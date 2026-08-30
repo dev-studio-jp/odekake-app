@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>どこいく？</title>
+<meta name="description" content="タップ3回で休日の行き先を3件提案">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<meta name="theme-color" content="#0f766e">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<style>
+  :root{
+    --bg:#f6f5f1; --card:#ffffff; --ink:#1c1917; --sub:#78716c;
+    --accent:#0f766e; --accent-ink:#ffffff; --chip:#e7e5e0; --chip-on:#0f766e;
+    --line:#e7e5e0; --danger:#b91c1c;
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent;}
+  html,body{margin:0; padding:0;}
+  body{
+    background:var(--bg); color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Noto Sans JP",sans-serif;
+    min-height:100dvh; padding-bottom:env(safe-area-inset-bottom);
+  }
+  .wrap{max-width:480px; margin:0 auto; padding:16px 16px 48px;}
+  header{display:flex; align-items:center; justify-content:space-between; padding:8px 0 4px;}
+  h1{font-size:1.5rem; margin:0; letter-spacing:.02em;}
+  h1 .q{color:var(--accent);}
+  #settingsBtn{background:none; border:none; font-size:1.3rem; cursor:pointer; padding:6px;}
+  .tag{font-size:.72rem; color:var(--sub); margin:0 0 14px;}
+
+  .field{margin-bottom:16px;}
+  .label{font-size:.82rem; font-weight:700; color:var(--sub); margin-bottom:8px; display:flex; justify-content:space-between; align-items:baseline;}
+  .label small{font-weight:400;}
+  .chips{display:flex; flex-wrap:wrap; gap:8px;}
+  .chip{
+    border:1px solid var(--line); background:var(--card); color:var(--ink);
+    border-radius:999px; padding:10px 16px; font-size:.95rem; cursor:pointer;
+  }
+  .chip.on{background:var(--chip-on); border-color:var(--chip-on); color:var(--accent-ink); font-weight:700;}
+  input[type=text], select{
+    width:100%; padding:12px 14px; font-size:1rem; border:1px solid var(--line);
+    border-radius:12px; background:var(--card); color:var(--ink);
+  }
+  input:focus, select:focus{outline:2px solid var(--accent); border-color:transparent;}
+
+  #goBtn{
+    width:100%; padding:16px; font-size:1.1rem; font-weight:800; letter-spacing:.05em;
+    background:var(--accent); color:var(--accent-ink); border:none; border-radius:14px;
+    cursor:pointer; margin-top:6px; box-shadow:0 4px 14px rgba(15,118,110,.25);
+  }
+  #goBtn:disabled{opacity:.5; box-shadow:none;}
+
+  #status{margin:16px 0; font-size:.9rem; color:var(--sub); text-align:center; min-height:1.3em;}
+  #status.err{color:var(--danger);}
+
+  .card{
+    background:var(--card); border:1px solid var(--line); border-radius:16px;
+    padding:16px; margin-bottom:12px; box-shadow:0 1px 4px rgba(0,0,0,.04);
+  }
+  .card .type{font-size:.7rem; font-weight:700; color:var(--accent); border:1px solid var(--accent);
+    border-radius:6px; padding:2px 7px; display:inline-block; margin-bottom:6px;}
+  .card h2{font-size:1.08rem; margin:0 0 2px;}
+  .card .area{font-size:.8rem; color:var(--sub); margin:0 0 8px;}
+  .card .reason{font-size:.92rem; margin:0 0 12px; line-height:1.55;}
+  .card a.map{
+    display:inline-block; font-size:.88rem; font-weight:700; color:var(--accent);
+    text-decoration:none; border:1px solid var(--accent); border-radius:999px; padding:8px 16px;
+  }
+  #againBtn{
+    width:100%; padding:13px; font-size:.98rem; font-weight:700;
+    background:var(--card); color:var(--accent); border:1.5px solid var(--accent);
+    border-radius:14px; cursor:pointer; margin-top:4px;
+  }
+
+  /* settings modal */
+  #modal{position:fixed; inset:0; background:rgba(0,0,0,.4); display:none; align-items:flex-end; z-index:10;}
+  #modal.open{display:flex;}
+  .sheet{background:var(--bg); width:100%; max-width:480px; margin:0 auto; border-radius:20px 20px 0 0; padding:20px 16px calc(24px + env(safe-area-inset-bottom));}
+  .sheet h3{margin:0 0 14px; font-size:1.05rem;}
+  .sheet .note{font-size:.8rem; color:var(--sub); line-height:1.6; margin:6px 0 14px;}
+  .sheet .note a{color:var(--accent);}
+  .rowbtns{display:flex; gap:10px; margin-top:16px;}
+  .rowbtns button{flex:1; padding:13px; border-radius:12px; font-size:.95rem; font-weight:700; cursor:pointer;}
+  #saveKey{background:var(--accent); color:#fff; border:none;}
+  #closeModal{background:var(--card); color:var(--ink); border:1px solid var(--line);}
+  .hidden{display:none !important;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>どこいく<span class="q">？</span></h1>
+    <button id="settingsBtn" aria-label="設定">⚙️</button>
+  </header>
+  <p class="tag">タップ3回で、今日の行き先。</p>
+
+  <div class="field">
+    <div class="label">だれと</div>
+    <div class="chips" id="whoChips"></div>
+  </div>
+
+  <div class="field">
+    <div class="label">エリア <small>（例: 横浜、新宿から30分）</small></div>
+    <input type="text" id="areaInput" placeholder="エリアや駅名" autocomplete="off">
+    <div class="chips" id="areaChips" style="margin-top:8px;"></div>
+  </div>
+
+  <div class="field">
+    <div class="label">きぶん</div>
+    <div class="chips" id="moodChips"></div>
+  </div>
+
+  <button id="goBtn">3件だして</button>
+  <div id="status"></div>
+  <div id="results"></div>
+  <button id="againBtn" class="hidden">別の3件をだす</button>
+</div>
+
+<div id="modal">
+  <div class="sheet">
+    <h3>設定</h3>
+    <div class="label">Gemini APIキー（無料）</div>
+    <input type="text" id="keyInput" placeholder="AIza..." autocomplete="off">
+    <p class="note">
+      <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a>
+      で無料発行できます。キーはこの端末のブラウザ内にだけ保存され、Google以外には送信されません。<br>
+      未設定のままだと、固定サンプルを返す<b>デモモード</b>で動きます。
+    </p>
+    <div class="label">予算（一人あたり）</div>
+    <select id="budgetSel">
+      <option value="0円（お金をかけない）">¥0（お金をかけない）</option>
+      <option value="2,000円まで">〜¥2,000</option>
+      <option value="5,000円まで" selected>〜¥5,000</option>
+      <option value="10,000円まで">〜¥10,000</option>
+      <option value="こだわらない">こだわらない</option>
+    </select>
+    <div class="rowbtns">
+      <button id="closeModal">閉じる</button>
+      <button id="saveKey">保存</button>
+    </div>
+  </div>
+</div>
+
+<script>
+"use strict";
+const WHO = ["ひとり","恋人","友達","家族"];
+const MOODS = ["のんびり","アクティブ","新しい体験","うまいもの"];
+const LS = {
+  key:"dq_gemini_key", areas:"dq_recent_areas", who:"dq_last_who",
+  mood:"dq_last_mood", budget:"dq_budget"
+};
+const $ = id => document.getElementById(id);
+const state = { who:null, mood:null, shown:[] };
+
+function lsGet(k, fb){ try{ const v = localStorage.getItem(k); return v===null?fb:v; }catch(e){ return fb; } }
+function lsSet(k, v){ try{ localStorage.setItem(k, v); }catch(e){} }
+
+function renderChips(el, items, sel, onPick){
+  el.innerHTML = "";
+  items.forEach(v=>{
+    const b = document.createElement("button");
+    b.className = "chip" + (v===sel ? " on" : "");
+    b.textContent = v;
+    b.onclick = ()=>onPick(v);
+    el.appendChild(b);
+  });
+}
+function refresh(){
+  renderChips($("whoChips"), WHO, state.who, v=>{ state.who=v; lsSet(LS.who,v); refresh(); });
+  renderChips($("moodChips"), MOODS, state.mood, v=>{ state.mood=v; lsSet(LS.mood,v); refresh(); });
+  const recents = JSON.parse(lsGet(LS.areas,"[]"));
+  renderChips($("areaChips"), recents, $("areaInput").value.trim(), v=>{ $("areaInput").value=v; refresh(); });
+}
+
+function setStatus(msg, isErr){
+  const s = $("status");
+  s.textContent = msg || "";
+  s.className = isErr ? "err" : "";
+}
+
+function mapsUrl(q){ return "https://www.google.com/maps/search/?api=1&query=" + encodeURIComponent(q); }
+
+function renderCards(items){
+  const box = $("results");
+  box.innerHTML = "";
+  items.forEach(it=>{
+    const c = document.createElement("div");
+    c.className = "card";
+    const type = document.createElement("span"); type.className="type"; type.textContent = it.type || "場所";
+    const h = document.createElement("h2"); h.textContent = it.title || "";
+    const area = document.createElement("p"); area.className="area"; area.textContent = it.area_hint || "";
+    const r = document.createElement("p"); r.className="reason"; r.textContent = it.reason || "";
+    const a = document.createElement("a"); a.className="map"; a.href = mapsUrl(it.query || it.title); a.target="_blank"; a.rel="noopener";
+    a.textContent = "マップで見る →";
+    c.append(type,h,area,r,a);
+    box.appendChild(c);
+  });
+  $("againBtn").classList.toggle("hidden", items.length===0);
+}
+
+function demoItems(area, mood){
+  // デモはAIを呼ばない固定テンプレ。入力エリアをマップ検索に埋め込むだけで、
+  // 実在確認はしていない＝「デモ」タグを必ず付ける
+  return [
+    {title:`${area}の商店街をぶらぶら`, type:"デモ", area_hint:area,
+     reason:`「${mood}」向けサンプルです。⚙️からAPIキーを設定すると本物の提案になります。`, query:`${area} 商店街`},
+    {title:`${area}のカフェでひと休み`, type:"デモ", area_hint:area,
+     reason:"エリア名でマップ検索するだけのサンプルカードです。", query:`${area} カフェ`},
+    {title:`${area}の公園・緑地さんぽ`, type:"デモ", area_hint:area,
+     reason:"エリア名でマップ検索するだけのサンプルカードです。", query:`${area} 公園`}
+  ];
+}
+
+function buildPrompt(who, area, mood, budget, excluded){
+  return `あなたは休日の過ごし方の提案者です。以下の条件で、日本の実在するおでかけ先または具体的な行動を、ちょうど3件提案してください。
+条件: 誰と=${who} / エリア=${area} / 気分=${mood} / 予算=一人あたり${budget}
+${excluded.length ? "次の候補は既に提示済みなので除外: " + excluded.join("、") : ""}
+ルール:
+- 実在が確実な有名スポット・チェーン・公共施設・自然を優先し、閉店リスクの高い無名の個店は出さない
+- 「場所」だけでなく「行動」（散歩コース、体験、過ごし方）の提案も混ぜてよい
+- reasonは条件（誰と・気分）に合う理由を1文で
+- queryはGoogleマップでそのまま検索できる文字列（施設名＋地名など）
+次のJSONだけを出力: {"suggestions":[{"title":"","type":"場所または行動","area_hint":"最寄り駅・エリア","reason":"","query":""}]}`;
+}
+
+async function callGemini(prompt, key){
+  const url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" + encodeURIComponent(key);
+  const res = await fetch(url, {
+    method:"POST",
+    headers:{ "Content-Type":"application/json" },
+    body: JSON.stringify({
+      contents:[{ parts:[{ text: prompt }] }],
+      generationConfig:{ responseMimeType:"application/json", temperature:1.0 }
+    })
+  });
+  if(!res.ok){
+    let detail = "";
+    try{ detail = (await res.json()).error?.message || ""; }catch(e){}
+    if(res.status===400 || res.status===403) throw new Error("APIキーが無効のようです。⚙️設定から確認してください。");
+    if(res.status===429) throw new Error("無料枠の本日分の上限に達しました。少し時間を置いて再試行してください。");
+    throw new Error("提案の取得に失敗（" + res.status + "）" + (detail?": "+detail.slice(0,120):""));
+  }
+  const data = await res.json();
+  const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+  let parsed;
+  try{ parsed = JSON.parse(text); }
+  catch(e){
+    const m = text.match(/\{[\s\S]*\}/);
+    if(!m) throw new Error("応答の形式が想定外でした。もう一度お試しください。");
+    parsed = JSON.parse(m[0]);
+  }
+  const items = parsed.suggestions || [];
+  if(!items.length) throw new Error("提案が空でした。条件を変えてお試しください。");
+  return items.slice(0,3);
+}
+
+async function suggest(isRetry){
+  const area = $("areaInput").value.trim();
+  if(!state.who || !state.mood || !area){
+    setStatus("「だれと」「エリア」「きぶん」の3つを選んでください。", true);
+    return;
+  }
+  const recents = JSON.parse(lsGet(LS.areas,"[]")).filter(a=>a!==area);
+  recents.unshift(area);
+  lsSet(LS.areas, JSON.stringify(recents.slice(0,4)));
+
+  if(!isRetry) state.shown = [];
+  const key = lsGet(LS.key,"");
+  const budget = lsGet(LS.budget, "5,000円まで");
+  $("goBtn").disabled = true; $("againBtn").disabled = true;
+  setStatus(key ? "考え中…" : "⚠️ デモモード: 下はサンプルです。⚙️からAPIキー（無料）を設定すると本物の提案が出ます。", !key);
+  try{
+    let items;
+    if(key){
+      items = await callGemini(buildPrompt(state.who, area, state.mood, budget, state.shown), key);
+      setStatus("");
+    }else{
+      await new Promise(r=>setTimeout(r,400));
+      items = demoItems(area, state.mood);
+    }
+    state.shown.push(...items.map(i=>i.title));
+    renderCards(items);
+  }catch(e){
+    setStatus(e.message, true);
+  }finally{
+    $("goBtn").disabled = false; $("againBtn").disabled = false;
+    refresh();
+  }
+}
+
+$("goBtn").onclick = ()=>suggest(false);
+$("againBtn").onclick = ()=>suggest(true);
+$("areaInput").addEventListener("input", refresh);
+
+$("settingsBtn").onclick = ()=>{
+  $("keyInput").value = lsGet(LS.key,"");
+  $("budgetSel").value = lsGet(LS.budget,"5,000円まで");
+  $("modal").classList.add("open");
+};
+$("closeModal").onclick = ()=>$("modal").classList.remove("open");
+$("saveKey").onclick = ()=>{
+  lsSet(LS.key, $("keyInput").value.trim());
+  lsSet(LS.budget, $("budgetSel").value);
+  $("modal").classList.remove("open");
+  setStatus(lsGet(LS.key,"") ? "APIキーを保存しました。" : "デモモードのままです。");
+};
+$("modal").onclick = e=>{ if(e.target===$("modal")) $("modal").classList.remove("open"); };
+
+state.who = lsGet(LS.who, null);
+state.mood = lsGet(LS.mood, null);
+const savedAreas = JSON.parse(lsGet(LS.areas,"[]"));
+if(savedAreas[0]) $("areaInput").value = savedAreas[0];
+refresh();
+
+if("serviceWorker" in navigator){ navigator.serviceWorker.register("sw.js").catch(()=>{}); }
+</script>
+</body>
+</html>
