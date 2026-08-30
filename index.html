@@ -149,7 +149,7 @@ const WHO = ["ひとり","恋人","友達","家族"];
 const MOODS = ["のんびり","アクティブ","新しい体験","うまいもの"];
 const LS = {
   key:"dq_gemini_key", areas:"dq_recent_areas", who:"dq_last_who",
-  mood:"dq_last_mood", budget:"dq_budget"
+  mood:"dq_last_mood", budget:"dq_budget", model:"dq_model"
 };
 const $ = id => document.getElementById(id);
 const state = { who:null, mood:null, shown:[] };
@@ -225,8 +225,33 @@ ${excluded.length ? "次の候補は既に提示済みなので除外: " + exclu
 次のJSONだけを出力: {"suggestions":[{"title":"","type":"場所または行動","area_hint":"最寄り駅・エリア","reason":"","query":""}]}`;
 }
 
-async function callGemini(prompt, key){
-  const url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" + encodeURIComponent(key);
+// モデル名は固定しない: 提供終了(404)対策として、キーで使える一覧から都度選ぶ
+async function resolveModel(key){
+  const cached = lsGet(LS.model, "");
+  if(cached) return cached;
+  const res = await fetch("https://generativelanguage.googleapis.com/v1beta/models?pageSize=200&key=" + encodeURIComponent(key));
+  if(!res.ok) throw new Error("モデル一覧の取得に失敗（" + res.status + "）。⚙️のAPIキーを確認してください。");
+  const data = await res.json();
+  const names = (data.models || [])
+    .filter(m => (m.supportedGenerationMethods || []).includes("generateContent"))
+    .map(m => m.name.replace(/^models\//, ""))
+    .filter(n => /^gemini-\d/.test(n))
+    .filter(n => !/(embedding|image|live|tts|audio|thinking|robotics|computer)/.test(n));
+  const ver = n => { const m = n.match(/^gemini-(\d+(?:\.\d+)?)/); return m ? parseFloat(m[1]) : 0; };
+  names.sort((a,b) => ver(b) - ver(a));
+  const top = names.filter(n => ver(n) === ver(names[0]));
+  const pick =
+    top.find(n => /flash/.test(n) && !/lite|preview/.test(n)) ||
+    top.find(n => /flash/.test(n)) ||
+    top.find(n => !/preview/.test(n)) ||
+    top[0];
+  if(!pick) throw new Error("利用可能なGeminiモデルが見つかりませんでした。");
+  lsSet(LS.model, pick);
+  return pick;
+}
+
+async function callGemini(model, prompt, key){
+  const url = "https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent?key=" + encodeURIComponent(key);
   const res = await fetch(url, {
     method:"POST",
     headers:{ "Content-Type":"application/json" },
@@ -238,9 +263,12 @@ async function callGemini(prompt, key){
   if(!res.ok){
     let detail = "";
     try{ detail = (await res.json()).error?.message || ""; }catch(e){}
-    if(res.status===400 || res.status===403) throw new Error("APIキーが無効のようです。⚙️設定から確認してください。");
-    if(res.status===429) throw new Error("無料枠の本日分の上限に達しました。少し時間を置いて再試行してください。");
-    throw new Error("提案の取得に失敗（" + res.status + "）" + (detail?": "+detail.slice(0,120):""));
+    let msg = "提案の取得に失敗（" + res.status + "）" + (detail?": "+detail.slice(0,120):"");
+    if(res.status===400 || res.status===403) msg = "APIキーが無効のようです。⚙️設定から確認してください。";
+    if(res.status===429) msg = "無料枠の本日分の上限に達しました。少し時間を置いて再試行してください。";
+    const err = new Error(msg);
+    err.status = res.status;
+    throw err;
   }
   const data = await res.json();
   const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
@@ -274,7 +302,17 @@ async function suggest(isRetry){
   try{
     let items;
     if(key){
-      items = await callGemini(buildPrompt(state.who, area, state.mood, budget, state.shown), key);
+      const prompt = buildPrompt(state.who, area, state.mood, budget, state.shown);
+      let model = await resolveModel(key);
+      try{
+        items = await callGemini(model, prompt, key);
+      }catch(e){
+        if(e.status===404){ // モデル提供終了 → キャッシュを捨てて選び直し1回だけ再試行
+          lsSet(LS.model, "");
+          model = await resolveModel(key);
+          items = await callGemini(model, prompt, key);
+        }else{ throw e; }
+      }
       setStatus("");
     }else{
       await new Promise(r=>setTimeout(r,400));
@@ -301,6 +339,7 @@ $("settingsBtn").onclick = ()=>{
 };
 $("closeModal").onclick = ()=>$("modal").classList.remove("open");
 $("saveKey").onclick = ()=>{
+  if($("keyInput").value.trim() !== lsGet(LS.key,"")) lsSet(LS.model, "");
   lsSet(LS.key, $("keyInput").value.trim());
   lsSet(LS.budget, $("budgetSel").value);
   $("modal").classList.remove("open");
