@@ -16,6 +16,13 @@
     --accent:#0f766e; --accent-ink:#ffffff; --chip:#e7e5e0; --chip-on:#0f766e;
     --line:#e7e5e0; --danger:#b91c1c;
   }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#191817; --card:#242220; --ink:#f2f0ec; --sub:#a8a29b;
+      --accent:#2dd4bf; --accent-ink:#0c2925; --chip:#33302d; --chip-on:#2dd4bf;
+      --line:#3a3733; --danger:#f87171;
+    }
+  }
   *{box-sizing:border-box; -webkit-tap-highlight-color:transparent;}
   html,body{margin:0; padding:0;}
   body{
@@ -70,11 +77,29 @@
     display:inline-block; font-size:.88rem; font-weight:700; color:var(--accent);
     text-decoration:none; border:1px solid var(--accent); border-radius:999px; padding:8px 16px;
   }
-  #againBtn{
+  #againBtn, #shareBtn{
     width:100%; padding:13px; font-size:.98rem; font-weight:700;
     background:var(--card); color:var(--accent); border:1.5px solid var(--accent);
     border-radius:14px; cursor:pointer; margin-top:4px;
   }
+  #shareBtn{border-style:dashed; margin-top:10px;}
+  #geoBtn{
+    flex:0 0 auto; border:1px solid var(--line); background:var(--card);
+    border-radius:12px; font-size:1.1rem; padding:0 14px; cursor:pointer;
+  }
+  .arearow{display:flex; gap:8px;}
+  .arearow input{flex:1;}
+  .card .skip{
+    background:none; border:none; color:var(--sub); font-size:.8rem;
+    cursor:pointer; padding:8px 0 0 12px; text-decoration:underline;
+  }
+  .card.dim{opacity:.45;}
+  .skel{
+    height:150px; border-radius:16px; border:1px solid var(--line); margin-bottom:12px;
+    background:linear-gradient(90deg, var(--card) 25%, var(--chip) 50%, var(--card) 75%);
+    background-size:200% 100%; animation:sh 1.2s linear infinite;
+  }
+  @keyframes sh{0%{background-position:200% 0}100%{background-position:-200% 0}}
 
   /* settings modal */
   #modal{position:fixed; inset:0; background:rgba(0,0,0,.4); display:none; align-items:flex-end; z-index:10;}
@@ -105,7 +130,10 @@
 
   <div class="field">
     <div class="label">エリア <small>（例: 横浜、新宿から30分）</small></div>
-    <input type="text" id="areaInput" placeholder="エリアや駅名" autocomplete="off">
+    <div class="arearow">
+      <input type="text" id="areaInput" placeholder="エリアや駅名" autocomplete="off">
+      <button id="geoBtn" title="現在地から入力" aria-label="現在地から入力">📍</button>
+    </div>
     <div class="chips" id="areaChips" style="margin-top:8px;"></div>
   </div>
 
@@ -118,6 +146,7 @@
   <div id="status"></div>
   <div id="results"></div>
   <button id="againBtn" class="hidden">別の3件をだす</button>
+  <button id="shareBtn" class="hidden">この3件を共有する</button>
 </div>
 
 <div id="modal">
@@ -138,6 +167,10 @@
       <option value="10,000円まで">〜¥10,000</option>
       <option value="こだわらない">こだわらない</option>
     </select>
+    <div class="label" style="margin-top:14px;">「もう行った」の除外リスト</div>
+    <div class="rowbtns" style="margin-top:6px;">
+      <button id="clearVisited" style="background:var(--card); color:var(--ink); border:1px solid var(--line);">除外リストを空にする（<span id="visitedCount">0</span>件）</button>
+    </div>
     <div class="rowbtns">
       <button id="closeModal">閉じる</button>
       <button id="saveKey">保存</button>
@@ -148,10 +181,10 @@
 <script>
 "use strict";
 const WHO = ["ひとり","恋人","友達","家族"];
-const MOODS = ["のんびり","アクティブ","新しい体験","うまいもの"];
+const MOODS = ["のんびり","アクティブ","新しい体験","うまいもの","家で過ごす"];
 const LS = {
   key:"dq_gemini_key", areas:"dq_recent_areas", who:"dq_last_who",
-  mood:"dq_last_mood", budget:"dq_budget", model:"dq_model"
+  mood:"dq_last_mood", budget:"dq_budget", model:"dq_model2", visited:"dq_visited"
 };
 const $ = id => document.getElementById(id);
 const state = { who:null, mood:null, shown:[] };
@@ -184,6 +217,34 @@ function setStatus(msg, isErr){
 
 function mapsUrl(q){ return "https://www.google.com/maps/search/?api=1&query=" + encodeURIComponent(q); }
 
+function getVisited(){ try{ return JSON.parse(lsGet(LS.visited,"[]")); }catch(e){ return []; } }
+function addVisited(t){
+  const v = getVisited().filter(x=>x!==t); v.unshift(t);
+  lsSet(LS.visited, JSON.stringify(v.slice(0,50)));
+}
+
+function withTimeout(p, ms){ return Promise.race([p, new Promise(r=>setTimeout(()=>r(null), ms))]); }
+
+// 天気は無料・キー不要のOpen-Meteo。取れなくても提案は止めない（1.5秒で諦める）
+async function getWeather(area){
+  try{
+    const g = await fetch("https://geocoding-api.open-meteo.com/v1/search?count=1&language=ja&name=" + encodeURIComponent(area)).then(r=>r.json());
+    const loc = g.results?.[0];
+    if(!loc) return "";
+    const f = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${loc.latitude}&longitude=${loc.longitude}&daily=precipitation_probability_max,temperature_2m_max&timezone=Asia%2FTokyo&forecast_days=1`).then(r=>r.json());
+    const p = f.daily?.precipitation_probability_max?.[0];
+    const t = f.daily?.temperature_2m_max?.[0];
+    if(p == null) return "";
+    return `降水確率${p}%・最高${Math.round(t)}°C${p>=50 ? "（雨寄り）" : ""}`;
+  }catch(e){ return ""; }
+}
+
+function renderSkeleton(){
+  $("results").innerHTML = '<div class="skel"></div><div class="skel"></div><div class="skel"></div>';
+  $("againBtn").classList.add("hidden");
+  $("shareBtn").classList.add("hidden");
+}
+
 function renderCards(items){
   const box = $("results");
   box.innerHTML = "";
@@ -197,7 +258,9 @@ function renderCards(items){
     const cost = document.createElement("p"); cost.className="cost"; cost.textContent = it.cost ? "💰 予算目安: " + it.cost : "";
     const a = document.createElement("a"); a.className="map"; a.href = mapsUrl(it.query || it.title); a.target="_blank"; a.rel="noopener";
     a.textContent = "マップで見る →";
-    c.append(type,h,area,r,cost,a);
+    const skip = document.createElement("button"); skip.className="skip"; skip.textContent = "もう行った・除外";
+    skip.onclick = ()=>{ addVisited(it.title); c.classList.add("dim"); skip.textContent = "除外しました"; skip.disabled = true; };
+    c.append(type,h,area,r,cost,a,skip);
     box.appendChild(c);
   });
   if(items.length){
@@ -207,6 +270,8 @@ function renderCards(items){
     box.appendChild(note);
   }
   $("againBtn").classList.toggle("hidden", items.length===0);
+  $("shareBtn").classList.toggle("hidden", items.length===0);
+  if(items.length) box.firstChild.scrollIntoView({behavior:"smooth", block:"start"});
 }
 
 function demoItems(area, mood){
@@ -222,14 +287,17 @@ function demoItems(area, mood){
   ];
 }
 
-function buildPrompt(who, area, mood, budget, excluded){
+function buildPrompt(who, area, mood, budget, excluded, weather){
   const now = new Date();
   const day = ["日","月","火","水","木","金","土"][now.getDay()];
   return `あなたは休日の過ごし方の提案者です。以下の条件で、日本の実在するおでかけ先または具体的な行動を、ちょうど3件提案してください。
 条件: 誰と=${who} / エリア=${area} / 気分=${mood} / 予算=一人あたり${budget}
 今の日時: ${now.getMonth()+1}/${now.getDate()}(${day}) ${now.getHours()}時頃（これから行ける提案にする）
-${excluded.length ? "次の候補は既に提示済みなので除外: " + excluded.join("、") : ""}
+${weather ? "今日の天気: " + weather : ""}
+${excluded.length ? "次の候補は既出または本人が除外済みなので出さない: " + excluded.join("、") : ""}
 ルール:
+- 気分が「家で過ごす」なら外出先ではなく、家や徒歩圏でできる過ごし方を提案する（本なら実在の書名と著者名、映画、料理など。queryは「${area} 書店」「${area} 図書館」のような近所で完結する検索語にする）
+- 降水確率が高い場合は屋内の提案を優先する
 - 実在が確実な有名スポット・チェーン・公共施設・自然を優先し、閉店リスクの高い無名の個店は出さない
 - 「場所」だけでなく「行動」（散歩コース、体験、過ごし方）の提案も混ぜてよい
 - reasonは条件（誰と・気分）に合う理由を1文で
@@ -257,8 +325,9 @@ async function resolveModels(key){
   const rest = names.filter(n => !top.includes(n));
   const ranked = [];
   const push = n => { if(n && !ranked.includes(n)) ranked.push(n); };
-  push(top.find(n => /flash/.test(n) && !/lite|preview/.test(n)));
+  // 体感速度優先: 最速のflash-lite系を第一候補にする
   push(top.find(n => /flash/.test(n) && /lite/.test(n) && !/preview/.test(n)));
+  push(top.find(n => /flash/.test(n) && !/lite|preview/.test(n)));
   push(top.find(n => /flash/.test(n)));
   push(top.find(n => !/preview/.test(n)));
   push(top[0]);
@@ -326,11 +395,16 @@ async function suggest(isRetry){
   $("goBtn").disabled = true; $("againBtn").disabled = true;
   $("goBtn").textContent = "考え中…"; $("againBtn").textContent = "考え中…";
   setStatus(key ? "考え中…" : "⚠️ デモモード: 下はサンプルです。⚙️からAPIキー（無料）を設定すると本物の提案が出ます。", !key);
+  renderSkeleton();
   try{
     let items;
     if(key){
-      const prompt = buildPrompt(state.who, area, state.mood, budget, state.shown);
+      // 天気とモデル一覧は並行取得。天気は1.5秒で見切って提案を優先する
+      const weatherP = withTimeout(getWeather(area), 1500);
       const models = await resolveModels(key);
+      const weather = (state.mood === "家で過ごす") ? "" : (await weatherP) || "";
+      const excluded = state.shown.concat(getVisited()).slice(0, 30);
+      const prompt = buildPrompt(state.who, area, state.mood, budget, excluded, weather);
       let lastErr = null;
       items = null;
       outer: for(const model of models){
@@ -362,6 +436,7 @@ async function suggest(isRetry){
     state.shown.push(...items.map(i=>i.title));
     renderCards(items);
   }catch(e){
+    $("results").innerHTML = "";
     setStatus(e.message, true);
   }finally{
     $("goBtn").disabled = false; $("againBtn").disabled = false;
@@ -374,9 +449,45 @@ $("goBtn").onclick = ()=>suggest(false);
 $("againBtn").onclick = ()=>suggest(true);
 $("areaInput").addEventListener("input", refresh);
 
+$("geoBtn").onclick = ()=>{
+  if(!navigator.geolocation){ setStatus("この端末では位置情報が使えません。", true); return; }
+  setStatus("現在地を取得中…");
+  navigator.geolocation.getCurrentPosition(async pos=>{
+    try{
+      const r = await fetch(`https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${pos.coords.latitude}&longitude=${pos.coords.longitude}&localityLanguage=ja`).then(x=>x.json());
+      const name = r.city || r.locality || r.principalSubdivision || "";
+      if(!name) throw new Error();
+      $("areaInput").value = name;
+      setStatus("");
+      refresh();
+    }catch(e){ setStatus("現在地から地名を特定できませんでした。手入力してください。", true); }
+  }, ()=>setStatus("位置情報を取得できませんでした（ブラウザの許可を確認）。", true), {timeout:8000});
+};
+
+$("shareBtn").onclick = async ()=>{
+  const lines = [...document.querySelectorAll(".card")].map(c=>{
+    const cost = (c.querySelector(".cost")?.textContent || "").replace("💰 予算目安: ","");
+    return `・${c.querySelector("h2").textContent}${cost ? "（"+cost+"）" : ""}\n  ${c.querySelector("a.map").href}`;
+  });
+  const text = "今日の候補です🙌\n" + lines.join("\n");
+  if(navigator.share){
+    try{ await navigator.share({text}); }catch(e){ /* キャンセルは無視 */ }
+  }else{
+    try{ await navigator.clipboard.writeText(text); setStatus("コピーしました。LINEなどに貼り付けてください。"); }
+    catch(e){ setStatus("コピーに失敗しました。", true); }
+  }
+};
+
+$("clearVisited").onclick = ()=>{
+  lsSet(LS.visited, "[]");
+  $("visitedCount").textContent = "0";
+  setStatus("除外リストを空にしました。");
+};
+
 $("settingsBtn").onclick = ()=>{
   $("keyInput").value = lsGet(LS.key,"");
   $("budgetSel").value = lsGet(LS.budget,"5,000円まで");
+  $("visitedCount").textContent = String(getVisited().length);
   $("modal").classList.add("open");
 };
 $("closeModal").onclick = ()=>$("modal").classList.remove("open");
