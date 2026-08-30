@@ -225,10 +225,11 @@ ${excluded.length ? "次の候補は既に提示済みなので除外: " + exclu
 次のJSONだけを出力: {"suggestions":[{"title":"","type":"場所または行動","area_hint":"最寄り駅・エリア","reason":"","query":""}]}`;
 }
 
-// モデル名は固定しない: 提供終了(404)対策として、キーで使える一覧から都度選ぶ
-async function resolveModel(key){
+// モデル名は固定しない: 提供終了(404)・混雑(503)・枠切れ(429)対策として、
+// キーで使える一覧から優先順位付きの候補リストを作る
+async function resolveModels(key){
   const cached = lsGet(LS.model, "");
-  if(cached) return cached;
+  if(cached){ try{ const a = JSON.parse(cached); if(Array.isArray(a) && a.length) return a; }catch(e){} }
   const res = await fetch("https://generativelanguage.googleapis.com/v1beta/models?pageSize=200&key=" + encodeURIComponent(key));
   if(!res.ok) throw new Error("モデル一覧の取得に失敗（" + res.status + "）。⚙️のAPIキーを確認してください。");
   const data = await res.json();
@@ -240,14 +241,20 @@ async function resolveModel(key){
   const ver = n => { const m = n.match(/^gemini-(\d+(?:\.\d+)?)/); return m ? parseFloat(m[1]) : 0; };
   names.sort((a,b) => ver(b) - ver(a));
   const top = names.filter(n => ver(n) === ver(names[0]));
-  const pick =
-    top.find(n => /flash/.test(n) && !/lite|preview/.test(n)) ||
-    top.find(n => /flash/.test(n)) ||
-    top.find(n => !/preview/.test(n)) ||
-    top[0];
-  if(!pick) throw new Error("利用可能なGeminiモデルが見つかりませんでした。");
-  lsSet(LS.model, pick);
-  return pick;
+  const rest = names.filter(n => !top.includes(n));
+  const ranked = [];
+  const push = n => { if(n && !ranked.includes(n)) ranked.push(n); };
+  push(top.find(n => /flash/.test(n) && !/lite|preview/.test(n)));
+  push(top.find(n => /flash/.test(n) && /lite/.test(n) && !/preview/.test(n)));
+  push(top.find(n => /flash/.test(n)));
+  push(top.find(n => !/preview/.test(n)));
+  push(top[0]);
+  push(rest.find(n => /flash/.test(n) && !/lite|preview/.test(n)));
+  push(rest.find(n => /flash/.test(n)));
+  if(!ranked.length) throw new Error("利用可能なGeminiモデルが見つかりませんでした。");
+  const list = ranked.slice(0,4);
+  lsSet(LS.model, JSON.stringify(list));
+  return list;
 }
 
 async function callGemini(model, prompt, key){
@@ -303,16 +310,30 @@ async function suggest(isRetry){
     let items;
     if(key){
       const prompt = buildPrompt(state.who, area, state.mood, budget, state.shown);
-      let model = await resolveModel(key);
-      try{
-        items = await callGemini(model, prompt, key);
-      }catch(e){
-        if(e.status===404){ // モデル提供終了 → キャッシュを捨てて選び直し1回だけ再試行
-          lsSet(LS.model, "");
-          model = await resolveModel(key);
-          items = await callGemini(model, prompt, key);
-        }else{ throw e; }
+      const models = await resolveModels(key);
+      let lastErr = null;
+      items = null;
+      outer: for(const model of models){
+        for(let attempt = 0; attempt < 2; attempt++){
+          try{
+            items = await callGemini(model, prompt, key);
+            break outer;
+          }catch(e){
+            lastErr = e;
+            if(e.status === 503 && attempt === 0){ // 混雑: 同じモデルで一度だけ再試行
+              setStatus("混雑中… 2秒後に再試行します");
+              await new Promise(r => setTimeout(r, 2000));
+              continue;
+            }
+            if(e.status === 503 || e.status === 429 || e.status === 404){ // 次の候補モデルへ
+              setStatus("別のモデルに切り替えて再試行中…");
+              break;
+            }
+            throw e; // キー不正などは即時表示
+          }
+        }
       }
+      if(!items){ lsSet(LS.model, ""); throw lastErr; } // 全滅: 次タップで候補を再取得
       setStatus("");
     }else{
       await new Promise(r=>setTimeout(r,400));
