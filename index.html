@@ -184,7 +184,7 @@ const WHO = ["ひとり","恋人","友達","家族"];
 const MOODS = ["のんびり","アクティブ","新しい体験","うまいもの","家で過ごす"];
 const LS = {
   key:"dq_gemini_key", areas:"dq_recent_areas", who:"dq_last_who",
-  mood:"dq_last_mood", budget:"dq_budget", model:"dq_model2", visited:"dq_visited"
+  mood:"dq_last_mood", budget:"dq_budget", model:"dq_model3", visited:"dq_visited"
 };
 const $ = id => document.getElementById(id);
 const state = { who:null, mood:null, shown:[] };
@@ -331,14 +331,14 @@ async function resolveModels(key){
   const rest = names.filter(n => !top.includes(n));
   const ranked = [];
   const push = n => { if(n && !ranked.includes(n)) ranked.push(n); };
-  // 体感速度優先: 最速のflash-lite系を第一候補にする
+  // レース用に系統を分散させる: lite系は無料枠の容量が別枠で大きく、混雑時の生き残り役
   push(top.find(n => /flash/.test(n) && /lite/.test(n) && !/preview/.test(n)));
+  push(rest.find(n => /flash/.test(n) && /lite/.test(n) && !/preview/.test(n))); // 旧世代lite
   push(top.find(n => /flash/.test(n) && !/lite|preview/.test(n)));
+  push(rest.find(n => /flash/.test(n) && !/lite|preview/.test(n))); // 旧世代flash
   push(top.find(n => /flash/.test(n)));
   push(top.find(n => !/preview/.test(n)));
   push(top[0]);
-  push(rest.find(n => /flash/.test(n) && !/lite|preview/.test(n)));
-  push(rest.find(n => /flash/.test(n)));
   if(!ranked.length) throw new Error("利用可能なGeminiモデルが見つかりませんでした。");
   const list = ranked.slice(0,4);
   lsSet(LS.model, JSON.stringify(list));
