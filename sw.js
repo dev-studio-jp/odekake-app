@@ -1,4 +1,4 @@
-const CACHE = "dq-v1";
+const CACHE = "dq-v2";
 const SHELL = ["./", "index.html", "manifest.webmanifest", "icon-180.png", "icon-512.png"];
 
 self.addEventListener("install", e => {

@@ -245,32 +245,38 @@ function renderSkeleton(){
   $("shareBtn").classList.add("hidden");
 }
 
-function renderCards(items){
+function cardEl(it){
+  const c = document.createElement("div");
+  c.className = "card";
+  const type = document.createElement("span"); type.className="type"; type.textContent = it.type || "場所";
+  const h = document.createElement("h2"); h.textContent = it.title || "";
+  const area = document.createElement("p"); area.className="area"; area.textContent = it.area_hint || "";
+  const r = document.createElement("p"); r.className="reason"; r.textContent = it.reason || "";
+  const cost = document.createElement("p"); cost.className="cost"; cost.textContent = it.cost ? "💰 予算目安: " + it.cost : "";
+  const a = document.createElement("a"); a.className="map"; a.href = mapsUrl(it.query || it.title); a.target="_blank"; a.rel="noopener";
+  a.textContent = "マップで見る →";
+  const skip = document.createElement("button"); skip.className="skip"; skip.textContent = "もう行った・除外";
+  skip.onclick = ()=>{ addVisited(it.title); c.classList.add("dim"); skip.textContent = "除外しました"; skip.disabled = true; };
+  c.append(type,h,area,r,cost,a,skip);
+  return c;
+}
+function appendCard(it){ $("results").appendChild(cardEl(it)); }
+function finishCards(n){
   const box = $("results");
-  box.innerHTML = "";
-  items.forEach(it=>{
-    const c = document.createElement("div");
-    c.className = "card";
-    const type = document.createElement("span"); type.className="type"; type.textContent = it.type || "場所";
-    const h = document.createElement("h2"); h.textContent = it.title || "";
-    const area = document.createElement("p"); area.className="area"; area.textContent = it.area_hint || "";
-    const r = document.createElement("p"); r.className="reason"; r.textContent = it.reason || "";
-    const cost = document.createElement("p"); cost.className="cost"; cost.textContent = it.cost ? "💰 予算目安: " + it.cost : "";
-    const a = document.createElement("a"); a.className="map"; a.href = mapsUrl(it.query || it.title); a.target="_blank"; a.rel="noopener";
-    a.textContent = "マップで見る →";
-    const skip = document.createElement("button"); skip.className="skip"; skip.textContent = "もう行った・除外";
-    skip.onclick = ()=>{ addVisited(it.title); c.classList.add("dim"); skip.textContent = "除外しました"; skip.disabled = true; };
-    c.append(type,h,area,r,cost,a,skip);
-    box.appendChild(c);
-  });
-  if(items.length){
+  if(n){
     const note = document.createElement("p");
     note.className = "foot-note";
     note.textContent = "※AIによる提案です。営業時間・料金・休業はマップ側で最新情報を確認してください。";
     box.appendChild(note);
   }
-  $("againBtn").classList.toggle("hidden", items.length===0);
-  $("shareBtn").classList.toggle("hidden", items.length===0);
+  $("againBtn").classList.toggle("hidden", n===0);
+  $("shareBtn").classList.toggle("hidden", n===0);
+}
+function renderCards(items){
+  const box = $("results");
+  box.innerHTML = "";
+  items.forEach(appendCard);
+  finishCards(items.length);
   if(items.length) box.firstChild.scrollIntoView({behavior:"smooth", block:"start"});
 }
 
@@ -346,37 +352,75 @@ function geminiBody(prompt, noThink){
   return JSON.stringify({ contents:[{ parts:[{ text: prompt }] }], generationConfig: gc });
 }
 
-async function callGemini(model, prompt, key){
-  const url = "https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent?key=" + encodeURIComponent(key);
-  const opts = body => ({ method:"POST", headers:{ "Content-Type":"application/json" }, body });
-  let res = await fetch(url, opts(geminiBody(prompt, true)));
-  if(res.status === 400){
-    let d = "";
-    try{ d = (await res.clone().json()).error?.message || ""; }catch(e){}
-    if(/think|unknown name/i.test(d)) res = await fetch(url, opts(geminiBody(prompt, false)));
-  }
+// 流れてくるJSONテキストから suggestions 配列内のオブジェクトを1個ずつ取り出す
+function makeItemExtractor(onItem){
+  let buf = "", pos = 0, depth = 0, inStr = false, esc = false, objStart = -1;
+  return chunk => {
+    buf += chunk;
+    for(; pos < buf.length; pos++){
+      const ch = buf[pos];
+      if(inStr){
+        if(esc) esc = false;
+        else if(ch === "\\") esc = true;
+        else if(ch === '"') inStr = false;
+        continue;
+      }
+      if(ch === '"'){ inStr = true; continue; }
+      if(ch === "{"){
+        depth++;
+        if(depth === 2 && objStart < 0) objStart = pos;
+      }else if(ch === "}"){
+        if(depth === 2 && objStart >= 0){
+          try{ onItem(JSON.parse(buf.slice(objStart, pos + 1))); }catch(e){}
+          objStart = -1;
+        }
+        depth--;
+      }
+    }
+  };
+}
+
+// ストリーミング呼び出し: 1件書き上がるごとに onItem を呼ぶ。戻り値は取得件数
+async function callGeminiStream(model, prompt, key, noThink, onItem, signal){
+  const url = "https://generativelanguage.googleapis.com/v1beta/models/" + model + ":streamGenerateContent?alt=sse&key=" + encodeURIComponent(key);
+  const res = await fetch(url, { method:"POST", headers:{ "Content-Type":"application/json" }, body: geminiBody(prompt, noThink), signal });
   if(!res.ok){
     let detail = "";
     try{ detail = (await res.json()).error?.message || ""; }catch(e){}
+    if(res.status === 400 && noThink && /think|unknown name/i.test(detail)){
+      return callGeminiStream(model, prompt, key, false, onItem, signal);
+    }
     let msg = "提案の取得に失敗（" + res.status + "）" + (detail?": "+detail.slice(0,120):"");
     if(res.status===400 || res.status===403) msg = "APIキーが無効のようです。⚙️設定から確認してください。";
-    if(res.status===429) msg = "無料枠の本日分の上限に達しました。少し時間を置いて再試行してください。";
+    if(res.status===429) msg = "無料枠の上限に達しました。別のモデルに切り替えます。";
     const err = new Error(msg);
     err.status = res.status;
     throw err;
   }
-  const data = await res.json();
-  const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-  let parsed;
-  try{ parsed = JSON.parse(text); }
-  catch(e){
-    const m = text.match(/\{[\s\S]*\}/);
-    if(!m) throw new Error("応答の形式が想定外でした。もう一度お試しください。");
-    parsed = JSON.parse(m[0]);
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let sse = "", count = 0;
+  const extract = makeItemExtractor(it => { if(count < 3){ count++; onItem(it); } });
+  while(true){
+    const {done, value} = await reader.read();
+    if(done) break;
+    sse += dec.decode(value, {stream:true});
+    let idx;
+    while((idx = sse.indexOf("\n")) >= 0){
+      const line = sse.slice(0, idx).trim();
+      sse = sse.slice(idx + 1);
+      if(!line.startsWith("data:")) continue;
+      const payload = line.slice(5).trim();
+      if(!payload || payload === "[DONE]") continue;
+      try{
+        const j = JSON.parse(payload);
+        const t = (j.candidates?.[0]?.content?.parts || []).map(p => p.text || "").join("");
+        if(t) extract(t);
+      }catch(e){}
+    }
+    if(count >= 3){ try{ reader.cancel(); }catch(e){} break; }
   }
-  const items = parsed.suggestions || [];
-  if(!items.length) throw new Error("提案が空でした。条件を変えてお試しください。");
-  return items.slice(0,3);
+  return count;
 }
 
 async function suggest(isRetry){
@@ -405,36 +449,60 @@ async function suggest(isRetry){
       const weather = (state.mood === "家で過ごす") ? "" : (await weatherP) || "";
       const excluded = state.shown.concat(getVisited()).slice(0, 30);
       const prompt = buildPrompt(state.who, area, state.mood, budget, excluded, weather);
-      let lastErr = null;
-      items = null;
-      outer: for(const model of models){
-        for(let attempt = 0; attempt < 2; attempt++){
-          try{
-            items = await callGemini(model, prompt, key);
-            break outer;
-          }catch(e){
-            lastErr = e;
-            if(e.status === 503 && attempt === 0){ // 混雑: 同じモデルで一度だけ再試行
-              setStatus("混雑中… 2秒後に再試行します");
-              await new Promise(r => setTimeout(r, 2000));
-              continue;
+      const t0 = performance.now();
+      const tick = setInterval(()=>setStatus("考え中… " + ((performance.now()-t0)/1000).toFixed(1) + "秒"), 200);
+      let lastErr = null, usedModel = "", got = [];
+      try{
+        outer: for(const model of models){
+          for(let attempt = 0; attempt < 2; attempt++){
+            const ctrl = new AbortController();
+            const killer = setTimeout(()=>ctrl.abort(), 10000); // 1試行あたり最大10秒
+            got = [];
+            try{
+              usedModel = model;
+              const n = await callGeminiStream(model, prompt, key, true, it => {
+                if(got.length === 0) $("results").innerHTML = ""; // スケルトンを外して即表示
+                got.push(it);
+                appendCard(it);
+                if(got.length === 1) $("results").firstChild.scrollIntoView({behavior:"smooth", block:"start"});
+              }, ctrl.signal);
+              clearTimeout(killer);
+              if(n > 0) break outer;
+              lastErr = new Error("提案が空でした。条件を変えてお試しください。");
+              break; // 次モデルへ
+            }catch(e){
+              clearTimeout(killer);
+              if(got.length > 0) break outer; // 途中まで出せた分は採用
+              if(e.name === "AbortError"){
+                lastErr = new Error("10秒以内に応答がないため打ち切りました。もう一度お試しください。");
+                break; // 次モデルへ
+              }
+              lastErr = e;
+              if(e.status === 503 && attempt === 0){
+                setStatus("混雑中… 再試行します");
+                await new Promise(r => setTimeout(r, 1000));
+                continue;
+              }
+              if(e.status === 503 || e.status === 429 || e.status === 404){
+                setStatus("別のモデルに切り替え中…");
+                break;
+              }
+              throw e; // キー不正などは即時表示
             }
-            if(e.status === 503 || e.status === 429 || e.status === 404){ // 次の候補モデルへ
-              setStatus("別のモデルに切り替えて再試行中…");
-              break;
-            }
-            throw e; // キー不正などは即時表示
           }
         }
-      }
-      if(!items){ lsSet(LS.model, ""); throw lastErr; } // 全滅: 次タップで候補を再取得
-      setStatus("");
+      }finally{ clearInterval(tick); }
+      if(!got.length){ lsSet(LS.model, ""); throw lastErr || new Error("提案を取得できませんでした。"); }
+      items = got;
+      finishCards(items.length);
+      setStatus("⚡ " + ((performance.now()-t0)/1000).toFixed(1) + "秒で生成（" + usedModel + "）");
+      state.shown.push(...items.map(i=>i.title));
     }else{
       await new Promise(r=>setTimeout(r,400));
       items = demoItems(area, state.mood);
+      state.shown.push(...items.map(i=>i.title));
+      renderCards(items);
     }
-    state.shown.push(...items.map(i=>i.title));
-    renderCards(items);
   }catch(e){
     $("results").innerHTML = "";
     setStatus(e.message, true);
