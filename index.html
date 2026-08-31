@@ -346,7 +346,8 @@ async function resolveModels(key){
 }
 
 function geminiBody(prompt, noThink){
-  const gc = { responseMimeType:"application/json", temperature:1.0, maxOutputTokens:1024 };
+  // 思考ありのモデルは思考分もmaxOutputTokensを食うため、上限を分けて途中切れを防ぐ
+  const gc = { responseMimeType:"application/json", temperature:1.0, maxOutputTokens: noThink ? 1024 : 8192 };
   // 思考(thinking)を切ると応答が数倍速くなる。非対応モデルには400で弾かれるので呼び元で再送
   if(noThink) gc.thinkingConfig = { thinkingBudget: 0 };
   return JSON.stringify({ contents:[{ parts:[{ text: prompt }] }], generationConfig: gc });
@@ -387,11 +388,13 @@ async function callGeminiStream(model, prompt, key, noThink, onItem, signal){
   if(!res.ok){
     let detail = "";
     try{ detail = (await res.json()).error?.message || ""; }catch(e){}
-    if(res.status === 400 && noThink && /think|unknown name/i.test(detail)){
+    // 400は思考オフ指定などパラメータ拒否の可能性があるため、まず素のリクエストで1回だけ再送
+    if(res.status === 400 && noThink){
       return callGeminiStream(model, prompt, key, false, onItem, signal);
     }
-    let msg = "提案の取得に失敗（" + res.status + "）" + (detail?": "+detail.slice(0,120):"");
-    if(res.status===400 || res.status===403) msg = "APIキーが無効のようです。⚙️設定から確認してください。";
+    // 誤診断を避けるため、APIの実エラー文をそのまま見せる
+    let msg = "提案の取得に失敗（" + res.status + "）" + (detail ? ": " + detail.slice(0,160) : "");
+    if(res.status===403 && !detail) msg = "APIキーが無効か権限がありません。⚙️設定から確認してください。";
     if(res.status===429) msg = "無料枠の上限に達しました。別のモデルに切り替えます。";
     const err = new Error(msg);
     err.status = res.status;
