@@ -192,7 +192,8 @@ const WHO = ["ひとり","恋人","友達","家族"];
 const MOODS = ["のんびり","アクティブ","新しい体験","うまいもの","家で過ごす"];
 const LS = {
   key:"dq_gemini_key", areas:"dq_recent_areas", who:"dq_last_who",
-  mood:"dq_last_mood", budget:"dq_budget", model:"dq_model3", visited:"dq_visited"
+  mood:"dq_last_mood", budget:"dq_budget", model:"dq_model3", visited:"dq_visited",
+  winner:"dq_winner"
 };
 const $ = id => document.getElementById(id);
 const state = { who:null, mood:null, shown:[] };
@@ -298,7 +299,11 @@ async function askDetail(prompt, ansEl, prefix){
   let text = "";
   ansEl.textContent = (prefix || "") + "調べています…";
   const models = await resolveModels(key);
-  for(const model of models.slice(0,2)){
+  // 直前の提案で実際に応答したモデルを最優先（混雑中のモデルに無駄打ちしない）
+  const winner = lsGet(LS.winner, "");
+  const cands = [winner, ...models].filter((v,i,a)=>v && a.indexOf(v)===i).slice(0,3);
+  const fails = [];
+  for(const model of cands){
     const ctrl = new AbortController();
     const killer = setTimeout(()=>ctrl.abort(), 15000);
     try{
@@ -308,12 +313,14 @@ async function askDetail(prompt, ansEl, prefix){
       }, ctrl.signal, true, true);
       clearTimeout(killer);
       if(text) return;
+      fails.push(model.replace("gemini-","") + "→0件");
     }catch(e){
       clearTimeout(killer);
       if(text) return; // 途中まで出た分は残す
+      fails.push(model.replace("gemini-","") + "→" + (e.name==="AbortError" ? "タイムアウト" : (e.status || e.message)));
     }
   }
-  if(!text) ansEl.textContent = (prefix || "") + "取得できませんでした。時間を置いて再試行してください。";
+  if(!text) ansEl.textContent = (prefix || "") + "取得できませんでした。時間を置いて再試行してください。［" + fails.join(" / ") + "］";
 }
 
 function cardEl(it){
@@ -592,6 +599,7 @@ async function suggest(isRetry){
       }
       items = got;
       finishCards(items.length);
+      lsSet(LS.winner, usedModel); // 深掘りでも同じモデルを最優先で使う
       setStatus("⚡ " + ((performance.now()-t0)/1000).toFixed(1) + "秒で生成（" + usedModel + "）");
       state.shown.push(...items.map(i=>i.title));
     }else{
