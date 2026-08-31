@@ -454,48 +454,40 @@ async function suggest(isRetry){
       const prompt = buildPrompt(state.who, area, state.mood, budget, excluded, weather);
       const t0 = performance.now();
       const tick = setInterval(()=>setStatus("考え中… " + ((performance.now()-t0)/1000).toFixed(1) + "秒"), 200);
-      let lastErr = null, usedModel = "", got = [];
-      try{
-        outer: for(const model of models){
-          for(let attempt = 0; attempt < 2; attempt++){
-            const ctrl = new AbortController();
-            const killer = setTimeout(()=>ctrl.abort(), 10000); // 1試行あたり最大10秒
-            got = [];
-            try{
-              usedModel = model;
-              const n = await callGeminiStream(model, prompt, key, true, it => {
-                if(got.length === 0) $("results").innerHTML = ""; // スケルトンを外して即表示
-                got.push(it);
-                appendCard(it);
-                if(got.length === 1) $("results").firstChild.scrollIntoView({behavior:"smooth", block:"start"});
-              }, ctrl.signal);
-              clearTimeout(killer);
-              if(n > 0) break outer;
-              lastErr = new Error("提案が空でした。条件を変えてお試しください。");
-              break; // 次モデルへ
-            }catch(e){
-              clearTimeout(killer);
-              if(got.length > 0) break outer; // 途中まで出せた分は採用
-              if(e.name === "AbortError"){
-                lastErr = new Error("10秒以内に応答がないため打ち切りました。もう一度お試しください。");
-                break; // 次モデルへ
-              }
-              lastErr = e;
-              if(e.status === 503 && attempt === 0){
-                setStatus("混雑中… 再試行します");
-                await new Promise(r => setTimeout(r, 1000));
-                continue;
-              }
-              if(e.status === 503 || e.status === 429 || e.status === 404){
-                setStatus("別のモデルに切り替え中…");
-                break;
-              }
-              throw e; // キー不正などは即時表示
-            }
+      let usedModel = "", got = [], winner = null;
+      const ctrls = new Map();
+      // 混雑対策: 候補モデル最大3つへ同時リクエスト。最初に書き始めた1つを採用し他は中断
+      const racers = models.slice(0,3).map(model => {
+        const ctrl = new AbortController();
+        ctrls.set(model, ctrl);
+        return callGeminiStream(model, prompt, key, true, it => {
+          if(winner === null){
+            winner = model;
+            usedModel = model;
+            for(const [m,c] of ctrls) if(m !== model){ try{ c.abort(); }catch(e){} }
+            $("results").innerHTML = ""; // スケルトンを外して即表示
           }
-        }
-      }finally{ clearInterval(tick); }
-      if(!got.length){ lsSet(LS.model, ""); throw lastErr || new Error("提案を取得できませんでした。"); }
+          if(winner === model && got.length < 3){
+            got.push(it);
+            appendCard(it);
+            if(got.length === 1) $("results").firstChild.scrollIntoView({behavior:"smooth", block:"start"});
+          }
+        }, ctrl.signal)
+        .then(n => ({model, n}))
+        .catch(e => ({model, err: e}));
+      });
+      const globalKiller = setTimeout(()=>{ for(const c of ctrls.values()){ try{ c.abort(); }catch(e){} } }, 12000);
+      const raceResults = await Promise.all(racers);
+      clearTimeout(globalKiller);
+      clearInterval(tick);
+      if(!got.length){
+        lsSet(LS.model, ""); // 次タップで候補を再取得
+        const summary = raceResults.map(r => {
+          const why = r.err ? (r.err.name === "AbortError" ? "12秒でタイムアウト" : (r.err.message || "").slice(0,80)) : "0件";
+          return r.model.replace("gemini-","") + "→" + why;
+        }).join(" / ");
+        throw new Error("全モデルで取得できませんでした。時間を置いて再試行してください。［" + summary + "］");
+      }
       items = got;
       finishCards(items.length);
       setStatus("⚡ " + ((performance.now()-t0)/1000).toFixed(1) + "秒で生成（" + usedModel + "）");
