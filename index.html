@@ -94,6 +94,14 @@
     cursor:pointer; padding:8px 0 0 12px; text-decoration:underline;
   }
   .card.dim{opacity:.45;}
+  .detail{
+    margin-top:10px; background:var(--chip); border-radius:12px; padding:12px;
+    font-size:.88rem; line-height:1.6;
+  }
+  .detail .ans{white-space:pre-wrap; min-height:1.2em;}
+  .detail .qrow{display:flex; gap:6px; margin-top:10px;}
+  .detail .qrow input{flex:1; padding:9px 10px; border-radius:8px; border:1px solid var(--line); background:var(--card); color:var(--ink); font-size:.9rem;}
+  .detail .qrow button{border:none; background:var(--accent); color:var(--accent-ink); border-radius:8px; padding:0 14px; font-weight:700; cursor:pointer;}
   .skel{
     height:150px; border-radius:16px; border:1px solid var(--line); margin-bottom:12px;
     background:linear-gradient(90deg, var(--card) 25%, var(--chip) 50%, var(--card) 75%);
@@ -245,6 +253,69 @@ function renderSkeleton(){
   $("shareBtn").classList.add("hidden");
 }
 
+// 深掘り・追加質問用のテキストストリーミング呼び出し
+// useSearch=Google検索連動（鮮度が要る質問向け・非対応なら呼び元で外して再送）
+async function callGeminiText(model, prompt, key, onText, signal, useSearch, noThink){
+  const url = "https://generativelanguage.googleapis.com/v1beta/models/" + model + ":streamGenerateContent?alt=sse&key=" + encodeURIComponent(key);
+  const gc = { temperature:0.7, maxOutputTokens: noThink ? 1024 : 8192 };
+  if(noThink) gc.thinkingConfig = { thinkingBudget: 0 };
+  const body = { contents:[{ parts:[{ text: prompt }] }], generationConfig: gc };
+  if(useSearch) body.tools = [{ google_search: {} }];
+  const res = await fetch(url, { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify(body), signal });
+  if(!res.ok){
+    if(res.status === 400 && useSearch) return callGeminiText(model, prompt, key, onText, signal, false, noThink);
+    if(res.status === 400 && noThink)   return callGeminiText(model, prompt, key, onText, signal, useSearch, false);
+    const err = new Error("取得に失敗（" + res.status + "）");
+    err.status = res.status;
+    throw err;
+  }
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let sse = "";
+  while(true){
+    const {done, value} = await reader.read();
+    if(done) break;
+    sse += dec.decode(value, {stream:true});
+    let idx;
+    while((idx = sse.indexOf("\n")) >= 0){
+      const line = sse.slice(0, idx).trim();
+      sse = sse.slice(idx + 1);
+      if(!line.startsWith("data:")) continue;
+      const payload = line.slice(5).trim();
+      if(!payload || payload === "[DONE]") continue;
+      try{
+        const j = JSON.parse(payload);
+        const t = (j.candidates?.[0]?.content?.parts || []).map(p => p.text || "").join("");
+        if(t) onText(t);
+      }catch(e){}
+    }
+  }
+}
+
+async function askDetail(prompt, ansEl, prefix){
+  const key = lsGet(LS.key, "");
+  if(!key){ ansEl.textContent = "⚙️からAPIキー（無料）を設定するとここで深掘りできます。"; return; }
+  let text = "";
+  ansEl.textContent = (prefix || "") + "調べています…";
+  const models = await resolveModels(key);
+  for(const model of models.slice(0,2)){
+    const ctrl = new AbortController();
+    const killer = setTimeout(()=>ctrl.abort(), 15000);
+    try{
+      await callGeminiText(model, prompt, key, t => {
+        text += t;
+        ansEl.textContent = (prefix || "") + text;
+      }, ctrl.signal, true, true);
+      clearTimeout(killer);
+      if(text) return;
+    }catch(e){
+      clearTimeout(killer);
+      if(text) return; // 途中まで出た分は残す
+    }
+  }
+  if(!text) ansEl.textContent = (prefix || "") + "取得できませんでした。時間を置いて再試行してください。";
+}
+
 function cardEl(it){
   const c = document.createElement("div");
   c.className = "card";
@@ -257,7 +328,38 @@ function cardEl(it){
   a.textContent = "マップで見る →";
   const skip = document.createElement("button"); skip.className="skip"; skip.textContent = "もう行った・除外";
   skip.onclick = ()=>{ addVisited(it.title); c.classList.add("dim"); skip.textContent = "除外しました"; skip.disabled = true; };
-  c.append(type,h,area,r,cost,a,skip);
+
+  const more = document.createElement("button"); more.className="skip"; more.textContent = "くわしく・質問";
+  const panel = document.createElement("div"); panel.className = "detail hidden";
+  const ans = document.createElement("div"); ans.className = "ans";
+  const qrow = document.createElement("div"); qrow.className = "qrow";
+  const qin = document.createElement("input"); qin.placeholder = "追加で質問（例: 予約いる？）";
+  const qbtn = document.createElement("button"); qbtn.textContent = "質問";
+  qrow.append(qin, qbtn);
+  panel.append(ans, qrow);
+  const ctx = `提案「${it.title}」（${it.area_hint || ""}・${it.reason || ""}）`;
+  let opened = false;
+  more.onclick = ()=>{
+    panel.classList.toggle("hidden");
+    if(!opened && !panel.classList.contains("hidden")){
+      opened = true;
+      askDetail(ctx + `について、今日これから行く客向けに具体的な中身を教えてください。
+- 映画館なら: 今上映中で評判の良い作品を2〜3本と各1行の理由
+- 商業施設・飲食エリアなら: 具体的な店名2〜3軒と名物
+- 公園・体験なら: 具体的な回り方や見どころ
+上映時間や営業時間など変わりやすい情報は「要確認」と付記。全体で6行以内、簡潔に。`, ans);
+    }
+  };
+  const ask = ()=>{
+    const q = qin.value.trim();
+    if(!q) return;
+    qin.value = "";
+    askDetail(ctx + `について質問です: ${q}\n5行以内で簡潔に。不確かな情報は「要確認」と付記。`, ans, "Q: " + q + "\n");
+  };
+  qbtn.onclick = ask;
+  qin.addEventListener("keydown", e=>{ if(e.key === "Enter") ask(); });
+
+  c.append(type,h,area,r,cost,a,skip,more,panel);
   return c;
 }
 function appendCard(it){ $("results").appendChild(cardEl(it)); }
