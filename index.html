@@ -106,6 +106,17 @@
   .detail .qrow{display:flex; gap:6px; margin-top:10px;}
   .detail .qrow input{flex:1; padding:9px 10px; border-radius:8px; border:1px solid var(--line); background:var(--card); color:var(--ink); font-size:.9rem;}
   .detail .qrow button{border:none; background:var(--accent); color:var(--accent-ink); border-radius:8px; padding:0 14px; font-weight:700; cursor:pointer;}
+  .card{touch-action:pan-y;}
+  .card.chosen{border:1.5px solid var(--accent);}
+  #onboard{position:fixed; inset:0; background:rgba(0,0,0,.55); display:flex; align-items:center; justify-content:center; z-index:20; padding:24px;}
+  .ob-card{background:var(--bg); border-radius:20px; padding:24px; max-width:340px; line-height:2; font-size:.95rem;}
+  .ob-card h3{margin:0 0 10px;}
+  .ob-card .small{font-size:.8rem; color:var(--sub); line-height:1.6;}
+  #obStart{width:100%; margin-top:14px; padding:13px; background:var(--accent); color:var(--accent-ink); border:none; border-radius:12px; font-weight:800; font-size:1rem; cursor:pointer;}
+  #installBar{position:fixed; left:50%; transform:translateX(-50%); bottom:12px; max-width:460px; width:calc(100% - 24px); background:var(--card); border:1px solid var(--line); border-radius:14px; padding:10px 12px; display:flex; gap:8px; align-items:center; font-size:.82rem; z-index:15; box-shadow:0 4px 16px rgba(0,0,0,.25);}
+  #installBar span{flex:1; line-height:1.5;}
+  #installGo{background:var(--accent); color:var(--accent-ink); border:none; border-radius:8px; padding:8px 14px; font-weight:700; cursor:pointer;}
+  #installX{background:none; border:none; color:var(--sub); font-size:1.05rem; cursor:pointer; padding:4px;}
   .skel{
     height:150px; border-radius:16px; border:1px solid var(--line); margin-bottom:12px;
     background:linear-gradient(90deg, var(--card) 25%, var(--chip) 50%, var(--card) 75%);
@@ -161,6 +172,23 @@
   <button id="shareBtn" class="hidden">この3件を共有する</button>
 </div>
 
+<div id="onboard" class="hidden">
+  <div class="ob-card">
+    <h3>どこいく？へようこそ 🙌</h3>
+    ① だれと・エリア・きぶんをタップ<br>
+    ② 3件の提案からピンとくるものを選ぶ<br>
+    ③ 「マップで見る」で出発！<br>
+    <p class="small">💡 カードを左にスワイプすると「もう行った」として次から出なくなります。気に入ったら「🎯 これに決めた」で記録すると、提案があなた好みになっていきます。</p>
+    <button id="obStart">はじめる</button>
+  </div>
+</div>
+
+<div id="installBar" class="hidden">
+  <span id="installMsg">ホーム画面に追加すると次からワンタップで開けます</span>
+  <button id="installGo" class="hidden">追加</button>
+  <button id="installX" aria-label="閉じる">✕</button>
+</div>
+
 <div id="modal">
   <div class="sheet">
     <h3>設定</h3>
@@ -179,6 +207,11 @@
       <option value="10,000円まで">〜¥10,000</option>
       <option value="こだわらない">こだわらない</option>
     </select>
+    <div class="label" style="margin-top:14px;">🎯 決めた履歴</div>
+    <p class="note" id="histList" style="margin:0 0 8px;">まだありません</p>
+    <div class="rowbtns" style="margin-top:0;">
+      <button id="clearHist" style="background:var(--card); color:var(--ink); border:1px solid var(--line);">履歴を消す（<span id="histCount">0</span>件）</button>
+    </div>
     <div class="label" style="margin-top:14px;">「もう行った」の除外リスト</div>
     <div class="rowbtns" style="margin-top:6px;">
       <button id="clearVisited" style="background:var(--card); color:var(--ink); border:1px solid var(--line);">除外リストを空にする（<span id="visitedCount">0</span>件）</button>
@@ -197,7 +230,7 @@ const MOODS = ["のんびり","アクティブ","新しい体験","うまいも�
 const LS = {
   key:"dq_gemini_key", areas:"dq_recent_areas", who:"dq_last_who",
   mood:"dq_last_mood", budget:"dq_budget", model:"dq_model3", visited:"dq_visited",
-  winner:"dq_winner"
+  winner:"dq_winner", history:"dq_history", onboard:"dq_onboarded", installDis:"dq_install_dismissed"
 };
 const $ = id => document.getElementById(id);
 const state = { who:null, mood:null, shown:[] };
@@ -234,6 +267,13 @@ function getVisited(){ try{ return JSON.parse(lsGet(LS.visited,"[]")); }catch(e)
 function addVisited(t){
   const v = getVisited().filter(x=>x!==t); v.unshift(t);
   lsSet(LS.visited, JSON.stringify(v.slice(0,50)));
+}
+
+function getHistory(){ try{ return JSON.parse(lsGet(LS.history,"[]")); }catch(e){ return []; } }
+function addChosen(t, a){
+  const h = getHistory();
+  h.unshift({ t, a, d: new Date().toLocaleDateString("ja-JP",{month:"numeric",day:"numeric"}) });
+  lsSet(LS.history, JSON.stringify(h.slice(0,50)));
 }
 
 function withTimeout(p, ms){ return Promise.race([p, new Promise(r=>setTimeout(()=>r(null), ms))]); }
@@ -399,7 +439,42 @@ function cardEl(it){
   qbtn.onclick = ask;
   qin.addEventListener("keydown", e=>{ if(e.key === "Enter") ask(); });
 
-  c.append(type,h,area,r,cost,a,skip,more,panel);
+  const decide = document.createElement("button"); decide.className="skip"; decide.textContent = "🎯 決めた";
+  decide.onclick = ()=>{
+    addChosen(it.title, it.area_hint || "");
+    c.classList.add("chosen");
+    decide.textContent = "決定済み 🎯"; decide.disabled = true;
+  };
+
+  // 左スワイプで「もう行った・除外」（リンクや入力の上では発動しない）
+  let sx=0, sy=0, dx=0, swiping=false;
+  c.addEventListener("touchstart", e=>{
+    if(e.target.closest("a,button,input")) return;
+    sx = e.touches[0].clientX; sy = e.touches[0].clientY; dx = 0; swiping = true;
+    c.style.transition = "";
+  }, {passive:true});
+  c.addEventListener("touchmove", e=>{
+    if(!swiping) return;
+    const mx = e.touches[0].clientX - sx, my = e.touches[0].clientY - sy;
+    if(Math.abs(my) > Math.abs(mx)) return;
+    dx = Math.min(0, mx);
+    c.style.transform = "translateX(" + dx + "px)";
+  }, {passive:true});
+  c.addEventListener("touchend", ()=>{
+    if(!swiping) return;
+    swiping = false;
+    if(dx < -90){
+      c.style.transition = "transform .25s, opacity .25s";
+      c.style.transform = "translateX(-120%)"; c.style.opacity = "0";
+      addVisited(it.title);
+      setTimeout(()=>c.remove(), 260);
+    }else{
+      c.style.transition = "transform .2s";
+      c.style.transform = "";
+    }
+  });
+
+  c.append(type,h,area,r,cost,a,skip,more,decide,panel);
   return c;
 }
 function appendCard(it){ $("results").appendChild(cardEl(it)); }
@@ -443,6 +518,7 @@ function buildPrompt(who, area, mood, budget, excluded, weather){
 今の日時: ${now.getMonth()+1}/${now.getDate()}(${day}) ${now.getHours()}時頃（これから行ける提案にする）
 ${weather ? "今日の天気: " + weather : ""}
 ${excluded.length ? "次の候補は既出または本人が除外済みなので出さない: " + excluded.join("、") : ""}
+${(()=>{ const h = getHistory().slice(0,5).map(x=>x.t); return h.length >= 3 ? "本人が過去に選んだ行き先（好みの参考にする。ただし同じものは出さず、1件は好みの系統・残りは幅を持たせる）: " + h.join("、") : ""; })()}
 ルール:
 - 気分が「家で過ごす」なら外出先ではなく、家や徒歩圏でできる過ごし方を提案する（本なら実在の書名と著者名、映画、料理など。queryは「${area} 書店」「${area} 図書館」のような近所で完結する検索語にする）
 - 降水確率が高い場合は屋内の提案を優先する
@@ -694,7 +770,15 @@ $("settingsBtn").onclick = ()=>{
   $("keyInput").value = lsGet(LS.key,"");
   $("budgetSel").value = lsGet(LS.budget,"5,000円まで");
   $("visitedCount").textContent = String(getVisited().length);
+  const h = getHistory();
+  $("histCount").textContent = String(h.length);
+  $("histList").textContent = h.length ? h.slice(0,8).map(x=>`${x.d} ${x.t}`).join(" ／ ") : "まだありません";
   $("modal").classList.add("open");
+};
+$("clearHist").onclick = ()=>{
+  lsSet(LS.history, "[]");
+  $("histCount").textContent = "0";
+  $("histList").textContent = "まだありません";
 };
 $("closeModal").onclick = ()=>$("modal").classList.remove("open");
 $("saveKey").onclick = ()=>{
@@ -711,6 +795,34 @@ state.mood = lsGet(LS.mood, null);
 const savedAreas = JSON.parse(lsGet(LS.areas,"[]"));
 if(savedAreas[0]) $("areaInput").value = savedAreas[0];
 refresh();
+
+// 初回オンボーディング
+if(!lsGet(LS.onboard,"")) $("onboard").classList.remove("hidden");
+else $("onboard").classList.add("hidden");
+$("obStart").onclick = ()=>{ $("onboard").classList.add("hidden"); lsSet(LS.onboard,"1"); };
+
+// ホーム画面追加の誘導（インストール済み・辞退済みなら出さない）
+(function(){
+  const standalone = matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+  if(standalone || lsGet(LS.installDis,"")) return;
+  const bar = $("installBar");
+  if(/iPhone|iPad|iPod/.test(navigator.userAgent)){
+    $("installMsg").textContent = "共有ボタン→「ホーム画面に追加」で、次からワンタップで開けます";
+    bar.classList.remove("hidden");
+  }else{
+    window.addEventListener("beforeinstallprompt", e=>{
+      e.preventDefault();
+      window._bip = e;
+      $("installGo").classList.remove("hidden");
+      bar.classList.remove("hidden");
+    });
+  }
+  $("installGo").onclick = async ()=>{
+    if(window._bip){ window._bip.prompt(); try{ await window._bip.userChoice; }catch(e){} }
+    bar.classList.add("hidden"); lsSet(LS.installDis,"1");
+  };
+  $("installX").onclick = ()=>{ bar.classList.add("hidden"); lsSet(LS.installDis,"1"); };
+})();
 
 if("serviceWorker" in navigator){ navigator.serviceWorker.register("sw.js").catch(()=>{}); }
 </script>
