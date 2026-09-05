@@ -46,7 +46,7 @@
     border-radius:999px; padding:10px 16px; font-size:.95rem; cursor:pointer;
   }
   .chip.on{background:var(--chip-on); border-color:var(--chip-on); color:var(--accent-ink); font-weight:700;}
-  input[type=text], select{
+  input[type=text], input[type=date], select{
     width:100%; padding:12px 14px; font-size:1rem; border:1px solid var(--line);
     border-radius:12px; background:var(--card); color:var(--ink);
   }
@@ -152,7 +152,7 @@
   </div>
 
   <div class="field">
-    <div class="label">エリア <small>（例: 横浜、新宿から30分）</small></div>
+    <div class="label" id="areaLabel">エリア <small>（例: 横浜、新宿から30分）</small></div>
     <div class="arearow">
       <input type="text" id="areaInput" placeholder="エリアや駅名" autocomplete="off">
       <button id="geoBtn" title="現在地から入力" aria-label="現在地から入力">📍</button>
@@ -169,10 +169,20 @@
     <div class="label">ジャンル <small>（お店の種類）</small></div>
     <div class="chips" id="genreChips"></div>
     <input type="text" id="genreInput" placeholder="その他のジャンル（例: タイ料理）" autocomplete="off" style="margin-top:8px;">
+    <div class="label" style="margin-top:12px;">お通し・チャージ料金</div>
+    <div class="chips" id="chargeChips"></div>
+  </div>
+
+  <div class="field hidden" id="tripField">
+    <div class="label">行き先の希望</div>
+    <div class="chips" id="destChips"></div>
+    <div class="label" style="margin-top:12px;">出発日・泊数 <small>（日付は空欄でもOK）</small></div>
+    <input type="date" id="dateInput">
+    <div class="chips" id="nightsChips" style="margin-top:8px;"></div>
   </div>
 
   <div class="field">
-    <div class="label">予算 <small>（一人あたり）</small></div>
+    <div class="label" id="budgetLabel">予算 <small>（一人あたり）</small></div>
     <div class="chips" id="budgetChips"></div>
   </div>
 
@@ -229,8 +239,11 @@
 <script>
 "use strict";
 const WHO = ["ひとり","恋人","友達","家族"];
-const MOODS = ["のんびり","アクティブ","新しい体験","ごはん","家で過ごす"];
+const MOODS = ["のんびり","アクティブ","新しい体験","ごはん","旅行","家で過ごす"];
 const GENRES = ["なんでも","カフェ・スイーツ","ラーメン","焼肉","寿司・海鮮","イタリアン","中華","居酒屋・バル","和食"];
+const CHARGES = ["気にしない","なしの店だけ"];
+const DESTS = ["国内","海外","おまかせ"];
+const NIGHTS = ["日帰り","1泊2日","2泊3日","3泊以上"];
 // 表示ラベル→プロンプト用の文字列（保存値は旧⚙️設定と互換）
 const BUDGETS = [
   ["¥0","0円（お金をかけない）"],
@@ -239,14 +252,23 @@ const BUDGETS = [
   ["〜¥10,000","10,000円まで"],
   ["気にしない","こだわらない"]
 ];
+// 旅行は金額レンジが別物なので予算チップを差し替える（総額・交通費+宿）
+const BUDGETS_TRIP = [
+  ["〜¥1万","10,000円まで"],
+  ["〜¥3万","30,000円まで"],
+  ["〜¥5万","50,000円まで"],
+  ["〜¥10万","100,000円まで"],
+  ["気にしない","こだわらない"]
+];
 const LS = {
   key:"dq_gemini_key", areas:"dq_recent_areas", who:"dq_last_who",
   mood:"dq_last_mood", budget:"dq_budget", model:"dq_model3", visited:"dq_visited",
   winner:"dq_winner", history:"dq_history", onboard:"dq_onboarded", installDis:"dq_install_dismissed",
-  genre:"dq_last_genre"
+  genre:"dq_last_genre", dest:"dq_last_dest", nights:"dq_last_nights", budgetTrip:"dq_budget_trip",
+  charge:"dq_last_charge"
 };
 const $ = id => document.getElementById(id);
-const state = { who:null, mood:null, genre:null, budget:null, shown:[] };
+const state = { who:null, mood:null, genre:null, budget:null, budgetTrip:null, dest:null, nights:null, charge:null, lastGenre:"", shown:[] };
 
 function lsGet(k, fb){ try{ const v = localStorage.getItem(k); return v===null?fb:v; }catch(e){ return fb; } }
 function lsSet(k, v){ try{ localStorage.setItem(k, v); }catch(e){} }
@@ -261,20 +283,39 @@ function renderChips(el, items, sel, onPick){
     el.appendChild(b);
   });
 }
+// 決めた履歴からジャンルの選択回数を数え、よく選ぶ順に並べ替える（「なんでも」は常に先頭）
+function sortedGenres(){
+  const cnt = {};
+  getHistory().forEach(x=>{ if(x.g && x.g !== "なんでも") cnt[x.g] = (cnt[x.g]||0)+1; });
+  return [GENRES[0], ...GENRES.slice(1).slice().sort((a,b)=>(cnt[b]||0)-(cnt[a]||0))];
+}
 function refresh(){
+  const isTrip = state.mood === "旅行";
   renderChips($("whoChips"), WHO, state.who, v=>{ state.who=v; lsSet(LS.who,v); refresh(); });
   renderChips($("moodChips"), MOODS, state.mood, v=>{ state.mood=v; lsSet(LS.mood,v); refresh(); });
   // ジャンルは「ごはん」のときだけ出す。自由入力があるときはチップの選択表示を外す
   $("genreField").classList.toggle("hidden", state.mood !== "ごはん");
   const customGenre = $("genreInput").value.trim();
-  renderChips($("genreChips"), GENRES, customGenre ? null : state.genre, v=>{
+  renderChips($("genreChips"), sortedGenres(), customGenre ? null : state.genre, v=>{
     state.genre=v; $("genreInput").value=""; lsSet(LS.genre,v); refresh();
   });
-  renderChips($("budgetChips"), BUDGETS.map(b=>b[0]), state.budget, v=>{ state.budget=v; lsSet(LS.budget, budgetPrompt(v)); refresh(); });
+  renderChips($("chargeChips"), CHARGES, state.charge, v=>{ state.charge=v; lsSet(LS.charge,v); refresh(); });
+  // 旅行のときだけ行き先希望・日付・泊数を出し、予算チップを総額レンジに差し替える
+  $("tripField").classList.toggle("hidden", !isTrip);
+  renderChips($("destChips"), DESTS, state.dest, v=>{ state.dest=v; lsSet(LS.dest,v); refresh(); });
+  renderChips($("nightsChips"), NIGHTS, state.nights, v=>{ state.nights=v; lsSet(LS.nights,v); refresh(); });
+  $("areaLabel").innerHTML = isTrip ? 'エリア <small>（出発地。例: 東京）</small>' : 'エリア <small>（例: 横浜、新宿から30分）</small>';
+  $("budgetLabel").innerHTML = isTrip ? '予算 <small>（一人あたり・交通費＋宿の総額）</small>' : '予算 <small>（一人あたり）</small>';
+  if(isTrip){
+    renderChips($("budgetChips"), BUDGETS_TRIP.map(b=>b[0]), state.budgetTrip, v=>{ state.budgetTrip=v; lsSet(LS.budgetTrip, v); refresh(); });
+  }else{
+    renderChips($("budgetChips"), BUDGETS.map(b=>b[0]), state.budget, v=>{ state.budget=v; lsSet(LS.budget, budgetPrompt(v)); refresh(); });
+  }
   const recents = JSON.parse(lsGet(LS.areas,"[]"));
   renderChips($("areaChips"), recents, $("areaInput").value.trim(), v=>{ $("areaInput").value=v; refresh(); });
 }
 function budgetPrompt(label){ return (BUDGETS.find(b=>b[0]===label) || BUDGETS[2])[1]; }
+function budgetTripPrompt(label){ return (BUDGETS_TRIP.find(b=>b[0]===label) || BUDGETS_TRIP[2])[1]; }
 
 function setStatus(msg, isErr){
   const s = $("status");
@@ -291,9 +332,9 @@ function addVisited(t){
 }
 
 function getHistory(){ try{ return JSON.parse(lsGet(LS.history,"[]")); }catch(e){ return []; } }
-function addChosen(t, a){
+function addChosen(t, a, g){
   const h = getHistory();
-  h.unshift({ t, a, d: new Date().toLocaleDateString("ja-JP",{month:"numeric",day:"numeric"}) });
+  h.unshift({ t, a, g: g || "", d: new Date().toLocaleDateString("ja-JP",{month:"numeric",day:"numeric"}) });
   lsSet(LS.history, JSON.stringify(h.slice(0,50)));
 }
 
@@ -409,9 +450,28 @@ function cardEl(it){
   const h = document.createElement("h2"); h.textContent = it.title || "";
   const area = document.createElement("p"); area.className="area"; area.textContent = it.area_hint || "";
   const r = document.createElement("p"); r.className="reason"; r.textContent = it.reason || "";
+  const extras = [];
+  if(it.hotel){
+    const ht = document.createElement("p"); ht.className="reason"; ht.textContent = "🏨 " + it.hotel;
+    extras.push(ht);
+  }
+  if(it.after){
+    const af = document.createElement("p"); af.className="reason"; af.textContent = "🚶 食後に: " + it.after;
+    extras.push(af);
+  }
+  if(it.charge){
+    const cg = document.createElement("p"); cg.className="reason"; cg.textContent = "🧾 お通し・チャージ: " + it.charge;
+    extras.push(cg);
+  }
   const cost = document.createElement("p"); cost.className="cost"; cost.textContent = it.cost ? "💰 予算目安: " + it.cost : "";
   const a = document.createElement("a"); a.className="map"; a.href = mapsUrl(it.query || it.title); a.target="_blank"; a.rel="noopener";
   a.textContent = "マップで見る →";
+  let tb = null;
+  if(state.mood === "ごはん" && it.type !== "デモ"){
+    tb = document.createElement("a"); tb.className="map"; tb.style.marginLeft = "8px";
+    tb.href = "https://tabelog.com/rstLst/?sw=" + encodeURIComponent(it.title || "");
+    tb.target = "_blank"; tb.rel = "noopener"; tb.textContent = "食べログ →";
+  }
   const skip = document.createElement("button"); skip.className="skip"; skip.textContent = "もう行った・除外";
   skip.onclick = ()=>{ addVisited(it.title); c.classList.add("dim"); skip.textContent = "除外しました"; skip.disabled = true; };
 
@@ -442,6 +502,8 @@ function cardEl(it){
     if(!opened && !panel.classList.contains("hidden")){
       opened = true;
       askDetail(ctx + `について、今日これから行く客向けに具体的な中身を教えてください。
+- まず今日の営業時間・定休日（いま営業中か）を1行で（公園など常時開放の場所や旅行先なら省略可）
+- 飲食店なら: お通し代・チャージ・席料の有無も1行で（不確かなら「要確認」）
 - 映画館なら: 今上映中で評判の良い作品を2〜3本と各1行の理由
 - 商業施設・飲食エリアなら: 具体的な店名2〜3軒と名物
 - 公園・体験なら: 具体的な回り方や見どころ
@@ -462,7 +524,7 @@ function cardEl(it){
 
   const decide = document.createElement("button"); decide.className="skip"; decide.textContent = "🎯 決めた";
   decide.onclick = ()=>{
-    addChosen(it.title, it.area_hint || "");
+    addChosen(it.title, it.area_hint || "", state.mood === "ごはん" ? state.lastGenre : "");
     c.classList.add("chosen");
     decide.textContent = "決定済み 🎯"; decide.disabled = true;
   };
@@ -495,7 +557,9 @@ function cardEl(it){
     }
   });
 
-  c.append(type,h,area,r,cost,a,skip,more,decide,panel);
+  c.append(type,h,area,r,...extras,cost,a);
+  if(tb) c.append(tb);
+  c.append(skip,more,decide,panel);
   return c;
 }
 function appendCard(it){ $("results").appendChild(cardEl(it)); }
@@ -531,22 +595,49 @@ function demoItems(area, mood){
   ];
 }
 
-function buildPrompt(who, area, mood, budget, excluded, weather, genre){
+function buildPrompt(who, area, mood, budget, excluded, weather, opts){
   const now = new Date();
   const day = ["日","月","火","水","木","金","土"][now.getDay()];
+  const o = opts || {};
+  const exLine = excluded.length ? "次の候補は既出または本人が除外済みなので出さない: " + excluded.join("、") : "";
+  const histLine = (()=>{ const h = getHistory().slice(0,5).map(x=>x.t); return h.length >= 3 ? "本人が過去に選んだ行き先（好みの参考にする。ただし同じものは出さず、1件は好みの系統・残りは幅を持たせる）: " + h.join("、") : ""; })();
+
+  if(mood === "旅行"){
+    return `あなたは旅行プランナーです。以下の条件で、旅行の行き先をちょうど3件提案してください。
+条件: 誰と=${who} / 出発地=${area} / 行き先の希望=${o.dest || "おまかせ"} / 出発日=${o.date || "未定（近いうちの週末と仮定）"} / 泊数=${o.nights || "1泊2日"} / 予算=一人あたり総額${budget}
+今日の日付: ${now.getFullYear()}/${now.getMonth()+1}/${now.getDate()}(${day})
+${exLine}
+${histLine}
+ルール:
+- 行き先の希望が「国内」なら都道府県レベル（title例: 石川県・金沢）、「海外」なら国レベル（title例: 台湾・台北）で提案する。「おまかせ」なら国内2件＋海外1件
+- area_hintは出発地からの移動手段と所要時間の目安（例: 新幹線で約2時間半 / 直行便で約4時間）
+- reasonは実在する代表スポットを2〜3個固有名詞で挙げ、誰と・出発日の季節や気候に合う理由を2文以内で
+- hotelは実在するホテルを1軒（有名ホテル・大手チェーン優先。店名に確信が持てなければ「◯◯駅周辺のビジネスホテル」のようにエリア指定でよい）＋特徴を1行
+- costは一人あたりの総額目安と内訳を短く（例: 約¥45,000（新幹線往復＋宿1泊））
+- 泊数と予算で無理のない距離にする（日帰りなら近場。海外がその泊数・予算で非現実的なら国内に置き換える）
+- 海外の場合はreasonの末尾にベストシーズンかどうかを一言添える
+- queryはGoogleマップで行き先を検索できる文字列
+次のJSONだけを出力: {"suggestions":[{"title":"","type":"国内旅行または海外旅行","area_hint":"","reason":"","cost":"","hotel":"","query":""}]}`;
+  }
+
   const isFood = mood === "ごはん";
+  const genre = o.genre || "";
+  const wantAfter = isFood && who === "恋人";
+  const noCharge = isFood && o.charge === "なしの店だけ";
   const foodRules = isFood ? `
 - 3件すべて「実在する具体的な飲食店」を正式な店名で提案する。「${area}の焼肉店めぐり」のような曖昧な提案・エリア名だけの提案は禁止
 - ジャンル=${genre || "なんでも"}${genre && genre !== "なんでも" ? "（このジャンルの店だけにする）" : "（幅を持たせてよい）"}
 - 実在に確信が持てる店だけを出す（有名店・評判のチェーン・古くからの名店を優先）。自信がない店名は出さない
 - titleは店名そのもの、area_hintは最寄り駅と徒歩目安、reasonは名物メニューと条件（誰と）に合う理由
+- chargeはお通し代・チャージ・席料の有無の見込みを短く（例: お通しあり¥300〜500・要確認 / なし（食券制のチェーン））。確信がなければ必ず「要確認」を付ける${noCharge ? "\n- お通し代・チャージ・席料が「ない」店だけを選ぶ（食券制・セルフ・カフェ・ファストカジュアル系を優先し、居酒屋・バーは原則避ける）" : ""}${wantAfter ? "\n- afterは食後に歩いて行ける「一歩き先」を実在の場所の固有名詞で1行（カフェ・夜景スポット・公園・散歩道など、恋人向け）" : ""}
 - queryは「店名 ${area}」の形式にする（マップで1軒に絞れるように）` : "";
+  const foodJson = isFood ? ',"charge":""' + (wantAfter ? ',"after":""' : "") : "";
   return `あなたは休日の過ごし方の提案者です。以下の条件で、日本の実在するおでかけ先または具体的な行動を、ちょうど3件提案してください。
 条件: 誰と=${who} / エリア=${area} / 気分=${mood}${isFood && genre ? "（ジャンル: " + genre + "）" : ""} / 予算=一人あたり${budget}${foodRules}
 今の日時: ${now.getMonth()+1}/${now.getDate()}(${day}) ${now.getHours()}時頃（これから行ける提案にする）
 ${weather ? "今日の天気: " + weather : ""}
-${excluded.length ? "次の候補は既出または本人が除外済みなので出さない: " + excluded.join("、") : ""}
-${(()=>{ const h = getHistory().slice(0,5).map(x=>x.t); return h.length >= 3 ? "本人が過去に選んだ行き先（好みの参考にする。ただし同じものは出さず、1件は好みの系統・残りは幅を持たせる）: " + h.join("、") : ""; })()}
+${exLine}
+${histLine}
 ルール:
 - 気分が「家で過ごす」なら外出先ではなく、家や徒歩圏でできる過ごし方を提案する（本なら実在の書名と著者名、映画、料理など。queryは「${area} 書店」「${area} 図書館」のような近所で完結する検索語にする）
 - 降水確率が高い場合は屋内の提案を優先する
@@ -556,7 +647,7 @@ ${(()=>{ const h = getHistory().slice(0,5).map(x=>x.t); return h.length >= 3 ? "
 - reasonは条件（誰と・気分）に合う理由を1文で
 - costは一人あたりの目安金額を短く（例: 約¥1,500（入館料＋ドリンク）、無料）
 - queryはGoogleマップでそのまま検索できる文字列（施設名＋地名など）
-次のJSONだけを出力: {"suggestions":[{"title":"","type":"場所または行動","area_hint":"最寄り駅・エリア","reason":"","cost":"","query":""}]}`;
+次のJSONだけを出力: {"suggestions":[{"title":"","type":"場所または行動","area_hint":"最寄り駅・エリア","reason":"","cost":"","query":""${foodJson}}]}`;
 }
 
 // モデル名は固定しない: 提供終了(404)・混雑(503)・枠切れ(429)対策として、
@@ -685,8 +776,10 @@ async function suggest(isRetry){
 
   if(!isRetry) state.shown = [];
   const key = lsGet(LS.key,"");
-  const budget = budgetPrompt(state.budget);
+  const isTrip = state.mood === "旅行";
+  const budget = isTrip ? budgetTripPrompt(state.budgetTrip) : budgetPrompt(state.budget);
   const genre = state.mood === "ごはん" ? ($("genreInput").value.trim() || state.genre || "なんでも") : "";
+  state.lastGenre = genre; // 「🎯決めた」時にジャンルを履歴へ記録するため
   $("goBtn").disabled = true; $("againBtn").disabled = true;
   $("goBtn").textContent = "考え中…"; $("againBtn").textContent = "考え中…";
   setStatus(key ? "考え中…" : "⚠️ デモモード: 下はサンプルです。⚙️からAPIキー（無料）を設定すると本物の提案が出ます。", !key);
@@ -697,9 +790,10 @@ async function suggest(isRetry){
       // 天気とモデル一覧は並行取得。天気は1.5秒で見切って提案を優先する
       const weatherP = withTimeout(getWeather(area), 1500);
       const models = await resolveModels(key);
-      const weather = (state.mood === "家で過ごす") ? "" : (await weatherP) || "";
+      const weather = (state.mood === "家で過ごす" || isTrip) ? "" : (await weatherP) || "";
       const excluded = state.shown.concat(getVisited()).slice(0, 30);
-      const prompt = buildPrompt(state.who, area, state.mood, budget, excluded, weather, genre);
+      const prompt = buildPrompt(state.who, area, state.mood, budget, excluded, weather,
+        { genre, charge: state.charge, dest: state.dest, date: $("dateInput").value, nights: state.nights });
       const t0 = performance.now();
       const tick = setInterval(()=>setStatus("考え中… " + ((performance.now()-t0)/1000).toFixed(1) + "秒"), 200);
       let usedModel = "", got = [], winner = null;
@@ -822,6 +916,10 @@ state.who = lsGet(LS.who, null);
 state.mood = lsGet(LS.mood, null);
 if(state.mood === "うまいもの"){ state.mood = "ごはん"; lsSet(LS.mood, state.mood); } // 旧名からの移行
 state.genre = lsGet(LS.genre, null);
+state.charge = lsGet(LS.charge, "気にしない");
+state.dest = lsGet(LS.dest, "国内");
+state.nights = lsGet(LS.nights, "1泊2日");
+state.budgetTrip = lsGet(LS.budgetTrip, "〜¥5万");
 // 予算: 保存はプロンプト文字列（旧⚙️設定と互換）、画面はラベル
 state.budget = (BUDGETS.find(b=>b[1]===lsGet(LS.budget,"5,000円まで")) || BUDGETS[2])[0];
 const savedAreas = JSON.parse(lsGet(LS.areas,"[]"));
