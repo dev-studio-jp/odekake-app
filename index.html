@@ -165,6 +165,17 @@
     <div class="chips" id="moodChips"></div>
   </div>
 
+  <div class="field hidden" id="genreField">
+    <div class="label">ジャンル <small>（お店の種類）</small></div>
+    <div class="chips" id="genreChips"></div>
+    <input type="text" id="genreInput" placeholder="その他のジャンル（例: タイ料理）" autocomplete="off" style="margin-top:8px;">
+  </div>
+
+  <div class="field">
+    <div class="label">予算 <small>（一人あたり）</small></div>
+    <div class="chips" id="budgetChips"></div>
+  </div>
+
   <button id="goBtn">3件だして</button>
   <div id="status"></div>
   <div id="results"></div>
@@ -199,14 +210,6 @@
       で無料発行できます。キーはこの端末のブラウザ内にだけ保存され、Google以外には送信されません。<br>
       未設定のままだと、固定サンプルを返す<b>デモモード</b>で動きます。
     </p>
-    <div class="label">予算（一人あたり）</div>
-    <select id="budgetSel">
-      <option value="0円（お金をかけない）">¥0（お金をかけない）</option>
-      <option value="2,000円まで">〜¥2,000</option>
-      <option value="5,000円まで" selected>〜¥5,000</option>
-      <option value="10,000円まで">〜¥10,000</option>
-      <option value="こだわらない">こだわらない</option>
-    </select>
     <div class="label" style="margin-top:14px;">🎯 決めた履歴</div>
     <p class="note" id="histList" style="margin:0 0 8px;">まだありません</p>
     <div class="rowbtns" style="margin-top:0;">
@@ -226,14 +229,24 @@
 <script>
 "use strict";
 const WHO = ["ひとり","恋人","友達","家族"];
-const MOODS = ["のんびり","アクティブ","新しい体験","うまいもの","家で過ごす"];
+const MOODS = ["のんびり","アクティブ","新しい体験","ごはん","家で過ごす"];
+const GENRES = ["なんでも","カフェ・スイーツ","ラーメン","焼肉","寿司・海鮮","イタリアン","中華","居酒屋・バル","和食"];
+// 表示ラベル→プロンプト用の文字列（保存値は旧⚙️設定と互換）
+const BUDGETS = [
+  ["¥0","0円（お金をかけない）"],
+  ["〜¥2,000","2,000円まで"],
+  ["〜¥5,000","5,000円まで"],
+  ["〜¥10,000","10,000円まで"],
+  ["気にしない","こだわらない"]
+];
 const LS = {
   key:"dq_gemini_key", areas:"dq_recent_areas", who:"dq_last_who",
   mood:"dq_last_mood", budget:"dq_budget", model:"dq_model3", visited:"dq_visited",
-  winner:"dq_winner", history:"dq_history", onboard:"dq_onboarded", installDis:"dq_install_dismissed"
+  winner:"dq_winner", history:"dq_history", onboard:"dq_onboarded", installDis:"dq_install_dismissed",
+  genre:"dq_last_genre"
 };
 const $ = id => document.getElementById(id);
-const state = { who:null, mood:null, shown:[] };
+const state = { who:null, mood:null, genre:null, budget:null, shown:[] };
 
 function lsGet(k, fb){ try{ const v = localStorage.getItem(k); return v===null?fb:v; }catch(e){ return fb; } }
 function lsSet(k, v){ try{ localStorage.setItem(k, v); }catch(e){} }
@@ -251,9 +264,17 @@ function renderChips(el, items, sel, onPick){
 function refresh(){
   renderChips($("whoChips"), WHO, state.who, v=>{ state.who=v; lsSet(LS.who,v); refresh(); });
   renderChips($("moodChips"), MOODS, state.mood, v=>{ state.mood=v; lsSet(LS.mood,v); refresh(); });
+  // ジャンルは「ごはん」のときだけ出す。自由入力があるときはチップの選択表示を外す
+  $("genreField").classList.toggle("hidden", state.mood !== "ごはん");
+  const customGenre = $("genreInput").value.trim();
+  renderChips($("genreChips"), GENRES, customGenre ? null : state.genre, v=>{
+    state.genre=v; $("genreInput").value=""; lsSet(LS.genre,v); refresh();
+  });
+  renderChips($("budgetChips"), BUDGETS.map(b=>b[0]), state.budget, v=>{ state.budget=v; lsSet(LS.budget, budgetPrompt(v)); refresh(); });
   const recents = JSON.parse(lsGet(LS.areas,"[]"));
   renderChips($("areaChips"), recents, $("areaInput").value.trim(), v=>{ $("areaInput").value=v; refresh(); });
 }
+function budgetPrompt(label){ return (BUDGETS.find(b=>b[0]===label) || BUDGETS[2])[1]; }
 
 function setStatus(msg, isErr){
   const s = $("status");
@@ -510,11 +531,18 @@ function demoItems(area, mood){
   ];
 }
 
-function buildPrompt(who, area, mood, budget, excluded, weather){
+function buildPrompt(who, area, mood, budget, excluded, weather, genre){
   const now = new Date();
   const day = ["日","月","火","水","木","金","土"][now.getDay()];
+  const isFood = mood === "ごはん";
+  const foodRules = isFood ? `
+- 3件すべて「実在する具体的な飲食店」を正式な店名で提案する。「${area}の焼肉店めぐり」のような曖昧な提案・エリア名だけの提案は禁止
+- ジャンル=${genre || "なんでも"}${genre && genre !== "なんでも" ? "（このジャンルの店だけにする）" : "（幅を持たせてよい）"}
+- 実在に確信が持てる店だけを出す（有名店・評判のチェーン・古くからの名店を優先）。自信がない店名は出さない
+- titleは店名そのもの、area_hintは最寄り駅と徒歩目安、reasonは名物メニューと条件（誰と）に合う理由
+- queryは「店名 ${area}」の形式にする（マップで1軒に絞れるように）` : "";
   return `あなたは休日の過ごし方の提案者です。以下の条件で、日本の実在するおでかけ先または具体的な行動を、ちょうど3件提案してください。
-条件: 誰と=${who} / エリア=${area} / 気分=${mood} / 予算=一人あたり${budget}
+条件: 誰と=${who} / エリア=${area} / 気分=${mood}${isFood && genre ? "（ジャンル: " + genre + "）" : ""} / 予算=一人あたり${budget}${foodRules}
 今の日時: ${now.getMonth()+1}/${now.getDate()}(${day}) ${now.getHours()}時頃（これから行ける提案にする）
 ${weather ? "今日の天気: " + weather : ""}
 ${excluded.length ? "次の候補は既出または本人が除外済みなので出さない: " + excluded.join("、") : ""}
@@ -523,6 +551,7 @@ ${(()=>{ const h = getHistory().slice(0,5).map(x=>x.t); return h.length >= 3 ? "
 - 気分が「家で過ごす」なら外出先ではなく、家や徒歩圏でできる過ごし方を提案する（本なら実在の書名と著者名、映画、料理など。queryは「${area} 書店」「${area} 図書館」のような近所で完結する検索語にする）
 - 降水確率が高い場合は屋内の提案を優先する
 - 実在が確実な有名スポット・チェーン・公共施設・自然を優先し、閉店リスクの高い無名の個店は出さない
+- できるだけ固有名詞（施設名・店名・公園名）で提案する。「${area}周辺のカフェ」のような曖昧なtitleは禁止
 - 「場所」だけでなく「行動」（散歩コース、体験、過ごし方）の提案も混ぜてよい
 - reasonは条件（誰と・気分）に合う理由を1文で
 - costは一人あたりの目安金額を短く（例: 約¥1,500（入館料＋ドリンク）、無料）
@@ -656,7 +685,8 @@ async function suggest(isRetry){
 
   if(!isRetry) state.shown = [];
   const key = lsGet(LS.key,"");
-  const budget = lsGet(LS.budget, "5,000円まで");
+  const budget = budgetPrompt(state.budget);
+  const genre = state.mood === "ごはん" ? ($("genreInput").value.trim() || state.genre || "なんでも") : "";
   $("goBtn").disabled = true; $("againBtn").disabled = true;
   $("goBtn").textContent = "考え中…"; $("againBtn").textContent = "考え中…";
   setStatus(key ? "考え中…" : "⚠️ デモモード: 下はサンプルです。⚙️からAPIキー（無料）を設定すると本物の提案が出ます。", !key);
@@ -669,7 +699,7 @@ async function suggest(isRetry){
       const models = await resolveModels(key);
       const weather = (state.mood === "家で過ごす") ? "" : (await weatherP) || "";
       const excluded = state.shown.concat(getVisited()).slice(0, 30);
-      const prompt = buildPrompt(state.who, area, state.mood, budget, excluded, weather);
+      const prompt = buildPrompt(state.who, area, state.mood, budget, excluded, weather, genre);
       const t0 = performance.now();
       const tick = setInterval(()=>setStatus("考え中… " + ((performance.now()-t0)/1000).toFixed(1) + "秒"), 200);
       let usedModel = "", got = [], winner = null;
@@ -768,7 +798,6 @@ $("clearVisited").onclick = ()=>{
 
 $("settingsBtn").onclick = ()=>{
   $("keyInput").value = lsGet(LS.key,"");
-  $("budgetSel").value = lsGet(LS.budget,"5,000円まで");
   $("visitedCount").textContent = String(getVisited().length);
   const h = getHistory();
   $("histCount").textContent = String(h.length);
@@ -784,7 +813,6 @@ $("closeModal").onclick = ()=>$("modal").classList.remove("open");
 $("saveKey").onclick = ()=>{
   if($("keyInput").value.trim() !== lsGet(LS.key,"")) lsSet(LS.model, "");
   lsSet(LS.key, $("keyInput").value.trim());
-  lsSet(LS.budget, $("budgetSel").value);
   $("modal").classList.remove("open");
   setStatus(lsGet(LS.key,"") ? "APIキーを保存しました。" : "デモモードのままです。");
 };
@@ -792,8 +820,18 @@ $("modal").onclick = e=>{ if(e.target===$("modal")) $("modal").classList.remove(
 
 state.who = lsGet(LS.who, null);
 state.mood = lsGet(LS.mood, null);
+if(state.mood === "うまいもの"){ state.mood = "ごはん"; lsSet(LS.mood, state.mood); } // 旧名からの移行
+state.genre = lsGet(LS.genre, null);
+// 予算: 保存はプロンプト文字列（旧⚙️設定と互換）、画面はラベル
+state.budget = (BUDGETS.find(b=>b[1]===lsGet(LS.budget,"5,000円まで")) || BUDGETS[2])[0];
 const savedAreas = JSON.parse(lsGet(LS.areas,"[]"));
 if(savedAreas[0]) $("areaInput").value = savedAreas[0];
+$("genreInput").addEventListener("input", ()=>{
+  // 自由入力を打ち始めたらチップの選択表示だけ外す（値はsuggest時に自由入力を優先）
+  renderChips($("genreChips"), GENRES, $("genreInput").value.trim() ? null : state.genre, v=>{
+    state.genre=v; $("genreInput").value=""; lsSet(LS.genre,v); refresh();
+  });
+});
 refresh();
 
 // 初回オンボーディング
